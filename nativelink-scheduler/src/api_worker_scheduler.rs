@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -35,7 +36,7 @@ use tracing::{event, Level};
 
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{ActionInfoWithProps, Worker, WorkerTimestamp, WorkerUpdate};
-use crate::worker_scheduler::WorkerScheduler;
+use crate::worker_scheduler::{WorkerInfo, WorkerScheduler};
 
 struct Workers(LruCache<WorkerId, Worker>);
 
@@ -536,6 +537,44 @@ impl WorkerScheduler for ApiWorkerScheduler {
     async fn set_drain_worker(&self, worker_id: &WorkerId, is_draining: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         inner.set_drain_worker(worker_id, is_draining).await
+    }
+
+    async fn get_worker_ids(&self) -> Result<Vec<WorkerId>, Error> {
+        let inner = self.inner.lock().await;
+        Ok(inner.workers.iter().map(|(id, _)| id.clone()).collect())
+    }
+
+    async fn get_all_workers_info(&self) -> Result<Vec<(WorkerId, WorkerInfo)>, Error> {
+        let inner = self.inner.lock().await;
+        let mut workers_info = Vec::new();
+
+        for (worker_id, worker) in inner.workers.iter() {
+            let running_operations: Vec<OperationId> =
+                worker.running_action_infos.keys().cloned().collect();
+
+            let platform_properties: HashMap<String, String> = worker
+                .platform_properties
+                .properties
+                .iter()
+                .map(|(k, v)| (k.clone(), format!("{:?}", v)))
+                .collect();
+
+            workers_info.push((
+                worker_id.clone(),
+                WorkerInfo {
+                    platform_properties,
+                    last_update_timestamp: worker.last_update_timestamp,
+                    is_paused: worker.is_paused,
+                    is_draining: worker.is_draining,
+                    can_accept_work: worker.can_accept_work(),
+                    running_operations,
+                    connected_timestamp: worker.get_connected_timestamp(),
+                    actions_completed: worker.get_actions_completed(),
+                },
+            ));
+        }
+
+        Ok(workers_info)
     }
 }
 

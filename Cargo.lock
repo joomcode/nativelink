@@ -547,6 +547,9 @@ dependencies = [
  "pin-project-lite",
  "rustversion",
  "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
  "tower 0.5.2",
  "tower-layer",
@@ -2162,6 +2165,8 @@ dependencies = [
  "prost",
  "prost-types",
  "rand 0.9.0",
+ "serde",
+ "serde_json",
  "serde_json5",
  "tokio",
  "tokio-stream",
@@ -3171,6 +3176,28 @@ checksum = "32a6b754515e1a7bd79fc2edeaecee526fc80cb3a918607e5ca149225a3a9586"
 dependencies = [
  "pest",
  "pest_derive",
+ "serde",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59fab13f937fa393d08645bf3a84bdfe86e296747b506ada67bb15f10f218b2a"
+dependencies = [
+ "itoa",
+ "serde",
+]
+
+[[package]]
+name = "serde_urlencoded"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
+dependencies = [
+ "form_urlencoded",
+ "itoa",
+ "ryu",
  "serde",
 ]
 

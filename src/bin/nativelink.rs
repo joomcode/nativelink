@@ -45,6 +45,7 @@ use nativelink_service::capabilities_server::CapabilitiesServer;
 use nativelink_service::cas_server::CasServer;
 use nativelink_service::execution_server::ExecutionServer;
 use nativelink_service::health_server::HealthServer;
+use nativelink_service::monitoring_server::MonitoringServer;
 use nativelink_service::worker_api_server::WorkerApiServer;
 use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
@@ -677,6 +678,32 @@ async fn inner_main(
                     ),
                 ),
             );
+        }
+
+        if let Some(monitoring_config) = services.monitoring {
+            let scheduler = action_schedulers
+                .get(&monitoring_config.scheduler)
+                .err_tip(|| {
+                    format!(
+                        "Scheduler '{}' not found for monitoring service",
+                        monitoring_config.scheduler
+                    )
+                })?
+                .clone();
+
+            // Find the corresponding worker scheduler
+            let worker_scheduler = worker_schedulers
+                .get(&monitoring_config.scheduler)
+                .err_tip(|| {
+                    format!(
+                        "Worker scheduler '{}' not found for monitoring service",
+                        monitoring_config.scheduler
+                    )
+                })?
+                .clone();
+
+            let monitoring_server = MonitoringServer::new(worker_scheduler, scheduler);
+            svc = svc.merge(monitoring_server.into_router());
         }
 
         svc = svc

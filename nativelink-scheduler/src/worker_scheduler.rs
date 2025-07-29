@@ -17,9 +17,23 @@ use nativelink_error::Error;
 use nativelink_metric::RootMetricsComponent;
 use nativelink_util::action_messages::{OperationId, WorkerId};
 use nativelink_util::operation_state_manager::UpdateOperationType;
+use std::collections::HashMap;
 
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{Worker, WorkerTimestamp};
+
+/// Information about a worker for monitoring purposes.
+#[derive(Debug, Clone)]
+pub struct WorkerInfo {
+    pub platform_properties: HashMap<String, String>,
+    pub last_update_timestamp: WorkerTimestamp,
+    pub is_paused: bool,
+    pub is_draining: bool,
+    pub can_accept_work: bool,
+    pub running_operations: Vec<OperationId>,
+    pub connected_timestamp: u64,
+    pub actions_completed: u64,
+}
 
 /// WorkerScheduler interface is responsible for interactions between the scheduler
 /// and worker related operations.
@@ -55,4 +69,12 @@ pub trait WorkerScheduler: Sync + Send + Unpin + RootMetricsComponent + 'static 
 
     /// Sets if the worker is draining or not.
     async fn set_drain_worker(&self, worker_id: &WorkerId, is_draining: bool) -> Result<(), Error>;
+
+    /// Returns a list of worker IDs that are currently connected.
+    /// This is used for monitoring purposes.
+    async fn get_worker_ids(&self) -> Result<Vec<WorkerId>, Error>;
+
+    /// Returns detailed information about all workers.
+    /// This is used for monitoring purposes.
+    async fn get_all_workers_info(&self) -> Result<Vec<(WorkerId, WorkerInfo)>, Error>;
 }

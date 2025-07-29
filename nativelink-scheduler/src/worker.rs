@@ -260,6 +260,16 @@ impl Worker {
     pub const fn can_accept_work(&self) -> bool {
         !self.is_paused && !self.is_draining
     }
+
+    /// Returns the timestamp when this worker connected.
+    pub fn get_connected_timestamp(&self) -> u64 {
+        self.metrics.connected_timestamp
+    }
+
+    /// Returns the number of actions completed by this worker.
+    pub fn get_actions_completed(&self) -> u64 {
+        self.metrics.actions_completed.counter.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 impl PartialEq for Worker {

@@ -41,8 +41,8 @@ use crate::api_worker_scheduler::ApiWorkerScheduler;
 use crate::awaited_action_db::{AwaitedActionDb, CLIENT_KEEPALIVE_DURATION};
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::simple_scheduler_state_manager::SimpleSchedulerStateManager;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerTimestamp};
-use crate::worker_scheduler::WorkerScheduler;
+use crate::worker::{Worker, WorkerTimestamp, ActionInfoWithProps};
+use crate::worker_scheduler::{WorkerScheduler, WorkerInfo};
 
 /// Default timeout for workers in seconds.
 /// If this changes, remember to change the documentation in the config.
@@ -519,6 +519,14 @@ impl WorkerScheduler for SimpleScheduler {
         self.worker_scheduler
             .set_drain_worker(worker_id, is_draining)
             .await
+    }
+
+    async fn get_worker_ids(&self) -> Result<Vec<WorkerId>, Error> {
+        self.worker_scheduler.get_worker_ids().await
+    }
+
+    async fn get_all_workers_info(&self) -> Result<Vec<(WorkerId, WorkerInfo)>, Error> {
+        self.worker_scheduler.get_all_workers_info().await
     }
 }
 

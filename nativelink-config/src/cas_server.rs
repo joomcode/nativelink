@@ -194,13 +194,18 @@ pub struct AdminConfig {
 #[derive(Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HealthConfig {
-    /// Path to register the health status check. If path is "/status", and your
-    /// domain is "example.com", you can reach the endpoint with:
-    /// <http://example.com/status>.
-    ///
+    /// The path to serve the health status check on.
     /// Default: "/status"
-    #[serde(default)]
+    #[serde(default, deserialize_with = "convert_string_with_shellexpand")]
     pub path: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct MonitoringConfig {
+    /// The scheduler to monitor. This should reference a scheduler defined in the schedulers section.
+    #[serde(deserialize_with = "convert_string_with_shellexpand")]
+    pub scheduler: SchedulerRefName,
 }
 
 #[derive(Deserialize, Debug)]
@@ -297,6 +302,10 @@ pub struct ServicesConfig {
 
     /// This is the service for health status check.
     pub health: Option<HealthConfig>,
+
+    /// This is the service for monitoring and dashboard API.
+    /// It provides a REST API endpoint for real-time monitoring of the scheduler state.
+    pub monitoring: Option<MonitoringConfig>,
 }
 
 #[derive(Deserialize, Debug)]
