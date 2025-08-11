@@ -556,11 +556,12 @@ impl ByteStreamServer {
         {
             let active_uploads = self.active_uploads.lock();
             if let Some((received_bytes, _maybe_idle_stream)) = active_uploads.get(uuid.as_ref()) {
+                let bytes = received_bytes.load(Ordering::Acquire);
                 return Ok(Response::new(QueryWriteStatusResponse {
-                    committed_size: received_bytes.load(Ordering::Acquire) as i64,
+                    committed_size: bytes as i64,
                     // If we are in the active_uploads map, but the value is None,
-                    // it means the stream is not complete.
-                    complete: false,
+                    // it means the stream is not complete, unless we've received all the bytes.
+                    complete: bytes == digest.size_bytes(),
                 }));
             }
         }
