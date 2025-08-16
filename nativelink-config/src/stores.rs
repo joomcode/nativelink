@@ -741,6 +741,18 @@ pub struct S3Spec {
     #[serde(default)]
     pub retry: Retry,
 
+    /// Disabled stalled stream protection on upload.
+    /// 
+    /// Default: false.
+    #[serde(default)]
+    pub stalled_stream_protection_disabled: Option<bool>,
+
+    /// Connect timeout.
+    ///
+    /// Default: 15.
+    #[serde(default)]
+    pub connect_timeout: u32,
+
     /// If the number of seconds since the `last_modified` time of the object
     /// is greater than this value, the object will not be considered
     /// "existing". This allows for external tools to delete objects that

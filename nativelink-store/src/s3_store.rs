@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use aws_config::default_provider::credentials;
 use aws_config::{AppName, BehaviorVersion};
 use aws_sdk_s3::config::Region;
+use aws_sdk_s3::config::StalledStreamProtectionConfig;
 use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
@@ -56,6 +57,7 @@ use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::retry::{Retrier, RetryResult};
 use nativelink_util::store_trait::{StoreDriver, StoreKey, UploadSizeInfo};
 use rand::Rng;
+use serde::__private::de::Content::U64;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, SemaphorePermit};
@@ -274,9 +276,14 @@ where
             let mut config_builder = aws_config::defaults(BehaviorVersion::v2024_03_28())
                 .credentials_provider(credential_provider)
                 .app_name(AppName::new("nativelink").expect("valid app name"))
+                .stalled_stream_protection(
+                    StalledStreamProtectionConfig::enabled()
+                        .upload_enabled(spec.stalled_stream_protection_disabled.unwrap())
+                        .build(),
+                )
                 .timeout_config(
                     aws_config::timeout::TimeoutConfig::builder()
-                        .connect_timeout(Duration::from_secs(15))
+                        .connect_timeout(Duration::from_secs(u64::from(spec.connect_timeout)))
                         .build(),
                 )
                 .region(Region::new(Cow::Owned(spec.region.clone())))
