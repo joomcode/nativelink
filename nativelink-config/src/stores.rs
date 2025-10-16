@@ -859,7 +859,10 @@ pub enum ExperimentalCloudObjectSpec {
 
 impl Default for ExperimentalCloudObjectSpec {
     fn default() -> Self {
-        Self::Aws(ExperimentalAwsSpec::default())
+        Self::Aws(ExperimentalAwsSpec {
+            connect_timeout: 15,
+            ..ExperimentalAwsSpec::default()
+        })
     }
 }
 
@@ -873,6 +876,12 @@ pub struct ExperimentalAwsSpec {
     /// Bucket name to use as the backend.
     #[serde(default, deserialize_with = "convert_string_with_shellexpand")]
     pub bucket: String,
+
+    /// Connect timeout.
+    ///
+    /// Default: 15.
+    #[serde(default)]
+    pub connect_timeout: u32,
 
     /// Common retry and upload configuration
     #[serde(flatten)]

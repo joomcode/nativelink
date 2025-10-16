@@ -466,7 +466,7 @@ where
                 .app_name(AppName::new("nativelink").expect("valid app name"))
                 .timeout_config(
                     aws_config::timeout::TimeoutConfig::builder()
-                        .connect_timeout(Duration::from_secs(15))
+                        .connect_timeout(Duration::from_secs(u64::from(spec.connect_timeout)))
                         .build(),
                 )
                 .region(Region::new(Cow::Owned(spec.region.clone())))
