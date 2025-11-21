@@ -1168,7 +1168,10 @@ impl SchedulerStore for RedisStore {
                         "{}",
                         get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY)
                     ),
-                    format!("@{}:{{ {} }}", K::INDEX_NAME, sanitized_field),
+                    match sanitized_field.is_empty() {
+                        true => String::from("*"),
+                        false => format!("@{}:{{ {} }}", K::INDEX_NAME, sanitized_field),
+                    },
                     FtAggregateOptions {
                         load: Some(Load::Some(vec![
                             SearchField {

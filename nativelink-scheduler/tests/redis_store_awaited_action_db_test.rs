@@ -216,19 +216,26 @@ impl Mocks for FakeRedisBackend {
         }
 
         if actual.cmd == Str::from_static("FT.AGGREGATE") {
-            // The query is @field:value where value might be wrapped in braces.
+            // The query is @field:value where value might be wrapped in braces or *.
             let query = actual.args[1]
                 .clone()
                 .into_string()
                 .expect("Aggregate query should be a string");
-            assert_eq!(&query[..1], "@");
-            let mut parts = query[1..].split(':');
-            let field = parts.next().expect("No field name");
-            let value = parts.next().expect("No value");
-            let value = value
-                .strip_prefix("{ ")
-                .and_then(|s| s.strip_suffix(" }"))
-                .unwrap_or(value);
+
+            let (field, value) = if query.as_str() == "*" {
+                ("", query.as_str())
+            } else {
+                assert_eq!(&query[..1], "@");
+                let mut parts = query[1..].split(':');
+                let field = parts.next().expect("No field name");
+                let value = parts.next().expect("No value");
+                let value = value
+                    .strip_prefix("{ ")
+                    .and_then(|s| s.strip_suffix(" }"))
+                    .unwrap_or(value);
+
+                (field, value)
+            };
             // Lazy implementation making assumptions.
             assert_eq!(
                 actual.args[2..6],
