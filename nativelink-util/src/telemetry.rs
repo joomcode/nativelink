@@ -182,6 +182,7 @@ pub fn init_tracing() -> Result<(), nativelink_error::Error> {
 
     registry()
         .with(tracing_stdout_layer())
+        .with(console_subscriber::spawn())
         .with(otlp_log_layer)
         .with(otlp_trace_layer)
         .with(otlp_metrics_layer)

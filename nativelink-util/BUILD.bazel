@@ -53,6 +53,7 @@ rust_library(
         "@crates//:bitflags",
         "@crates//:blake3",
         "@crates//:bytes",
+        "@crates//:console-subscriber",
         "@crates//:futures",
         "@crates//:hex",
         "@crates//:humantime",

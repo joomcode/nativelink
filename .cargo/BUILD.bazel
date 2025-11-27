@@ -1,0 +1,6 @@
+exports_files(
+    [
+        "config.toml",
+    ],
+    visibility = ["//visibility:public"],
+)

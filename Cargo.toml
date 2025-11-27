@@ -50,6 +50,7 @@ clap = { version = "4.5.35", features = [
   "suggestions",
   "usage",
 ], default-features = false }
+console-subscriber = "0.5.0"
 futures = { version = "0.3.31", default-features = false }
 hyper = { version = "1.6.0", default-features = false }
 hyper-util = { version = "0.1.11", default-features = false }
@@ -65,6 +66,7 @@ tokio = { version = "1.44.1", features = [
   "io-util",
   "rt-multi-thread",
   "signal",
+  "tracing",
 ], default-features = false }
 tokio-rustls = { version = "0.26.2", default-features = false, features = [
   "ring",
