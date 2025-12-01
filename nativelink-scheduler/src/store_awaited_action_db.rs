@@ -17,6 +17,7 @@ use core::ops::Bound;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::UNIX_EPOCH;
 
@@ -36,11 +37,11 @@ use nativelink_util::store_trait::{
 };
 use nativelink_util::task::JoinHandleDropGuard;
 use tokio::sync::Notify;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::awaited_action_db::{
     AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CLIENT_KEEPALIVE_DURATION,
-    SortedAwaitedAction, SortedAwaitedActionState,
+    CountableActionStage, SortedAwaitedAction, SortedAwaitedActionState,
 };
 
 type ClientOperationId = OperationId;
@@ -950,5 +951,46 @@ where
                     self.now_fn.clone(),
                 )
             }))
+    }
+
+    async fn get_queued_actions(&self) -> Result<Vec<Arc<AwaitedAction>>, Error> {
+        let prefix = SearchStateToAwaitedAction(get_state_prefix(SortedAwaitedActionState::Queued));
+        let awaited_actions: Vec<Arc<AwaitedAction>> = self
+            .store
+            .search_by_index_prefix(prefix)
+            .await
+            .err_tip(|| "In RedisAwaitedActionDb::get_queued_actions")?
+            .map_ok(|awaited_action| Arc::new(AwaitedAction::from(awaited_action)))
+            .try_collect()
+            .await
+            .err_tip(|| "In RedisAwaitedActionDb::get_queued_actions")?;
+
+        Ok(awaited_actions)
+    }
+
+    async fn count_actions(
+        &self,
+        states: Vec<CountableActionStage>,
+    ) -> Result<HashMap<CountableActionStage, usize>, Error> {
+        let prefixes: Vec<SearchStateToAwaitedAction> = states
+            .iter()
+            .map(|s| {
+                SearchStateToAwaitedAction(get_state_prefix(
+                    SortedAwaitedActionState::try_from(s).unwrap(),
+                ))
+            })
+            .collect();
+
+        let counts = self
+            .store
+            .count_by_index(prefixes)
+            .await
+            .err_tip(|| "In RedisAwaitedActionDb::count_actions")?;
+
+        Ok(states
+            .iter()
+            .zip(counts)
+            .map(|(&s, count)| (s, count))
+            .collect())
     }
 }

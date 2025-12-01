@@ -26,7 +26,9 @@ use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::
 use nativelink_util::action_messages::{ActionInfo, OperationId, WorkerId};
 use nativelink_util::metrics_utils::{AsyncCounterWrapper, CounterWithTime, FuncCounterWrapper};
 use nativelink_util::platform_properties::{PlatformProperties, PlatformPropertyValue};
+use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
+use crate::awaited_action_db::AwaitedAction;
 
 pub type WorkerTimestamp = u64;
 
@@ -34,7 +36,7 @@ pub type WorkerTimestamp = u64;
 /// These platform properties have the type of the properties as well as
 /// the value of the properties, unlike `ActionInfo`, which only has the
 /// string value of the properties.
-#[derive(Clone, Debug, MetricsComponent)]
+#[derive(Clone, Debug, MetricsComponent, Serialize)]
 pub struct ActionInfoWithProps {
     /// The action info of the action.
     #[metric(group = "action_info")]
@@ -54,10 +56,27 @@ pub enum WorkerUpdate {
     Disconnect,
 }
 
-#[derive(Debug, MetricsComponent)]
+#[derive(Debug, MetricsComponent, Serialize, Clone)]
 pub struct PendingActionInfoData {
     #[metric]
     pub action_info: ActionInfoWithProps,
+}
+
+#[derive(Serialize)]
+pub struct WorkerState {
+    pub id: WorkerId,
+    pub platform_properties: PlatformProperties,
+    pub running_action_infos: HashMap<String, PendingActionInfoData>,
+    pub last_update_timestamp: WorkerTimestamp,
+    pub is_paused: bool,
+    pub is_draining: bool,
+}
+
+#[derive(Serialize)]
+pub struct ActionsState {
+    pub executing: usize,
+    pub queued: usize,
+    pub completed: usize,
 }
 
 /// Represents a connection to a worker and used as the medium to
@@ -283,6 +302,17 @@ impl Worker {
             && (self.max_inflight_tasks == 0
                 || u64::try_from(self.running_action_infos.len()).unwrap_or(u64::MAX)
                     < self.max_inflight_tasks)
+    }
+
+    pub fn to_state(&self) -> WorkerState {
+        WorkerState {
+            id: self.id.clone(),
+            platform_properties: self.platform_properties.clone(),
+            running_action_infos: self.running_action_infos.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            last_update_timestamp: self.last_update_timestamp,
+            is_paused: self.is_paused,
+            is_draining: self.is_draining,
+        }
     }
 }
 

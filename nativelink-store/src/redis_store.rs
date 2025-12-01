@@ -17,8 +17,12 @@ use core::pin::Pin;
 use core::time::Duration;
 use core::{cmp, iter};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ops::Index;
 use std::sync::{Arc, Weak};
 
+use crate::cas_utils::is_zero_digest;
+use crate::redis_utils::ft_aggregate;
 use async_trait::async_trait;
 use bytes::Bytes;
 use const_format::formatcp;
@@ -29,15 +33,15 @@ use fred::types::config::{
     Config as RedisConfig, ConnectionConfig, PerformanceConfig, ReconnectPolicy, UnresponsiveConfig,
 };
 use fred::types::redisearch::{
-    AggregateOperation, FtAggregateOptions, FtCreateOptions, IndexKind, Load, SearchField,
-    SearchSchema, SearchSchemaKind, WithCursor,
+    AggregateOperation, FtAggregateOptions, FtCreateOptions, IndexKind, Load, ReducerFunc,
+    SearchField, SearchReducer, SearchSchema, SearchSchemaKind, WithCursor,
 };
 use fred::types::scan::Scanner;
 use fred::types::scripts::Script;
 use fred::types::{Builder, Key as RedisKey, Map as RedisMap, SortOrder, Value as RedisValue};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt, future};
-use itertools::izip;
+use itertools::{Itertools, izip};
 use nativelink_config::stores::{RedisMode, RedisSpec};
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_metric::MetricsComponent;
@@ -57,9 +61,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::sleep;
 use tracing::{error, info, trace, warn};
 use uuid::Uuid;
-
-use crate::cas_utils::is_zero_digest;
-use crate::redis_utils::ft_aggregate;
 
 /// The default size of the read chunk when reading data from Redis.
 /// Note: If this changes it should be updated in the config documentation.
@@ -1330,6 +1331,91 @@ impl SchedulerStore for RedisStore {
             }
             Ok(Some(0)) // Always use "0" version since this is not a versioned request.
         }
+    }
+
+    async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send,
+    {
+        let index_values: Vec<_> = index.iter().map(|k| k.index_value()).collect();
+        let sanitized_fields: Vec<String> = index_values
+            .iter()
+            .map(|v| try_sanitize(v.as_ref()))
+            .map(|s| s.clone().unwrap_or_default().to_string())
+            .collect();
+        let index_name = format!(
+            "{}",
+            get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY)
+        );
+
+        let client = self.get_client().await?;
+
+        let query = if sanitized_fields.is_empty() {
+            "*".to_string()
+        } else {
+            format!("@{}:{{ {} }}", K::INDEX_NAME, sanitized_fields.join("|"))
+        };
+
+        let result: RedisValue = client
+            .client
+            .clone()
+            .ft_aggregate(
+                index_name,
+                query,
+                FtAggregateOptions {
+                    pipeline: vec![AggregateOperation::GroupBy {
+                        fields: vec![format!("@{}", K::INDEX_NAME).into()],
+                        reducers: vec![SearchReducer {
+                            func: ReducerFunc::Count,
+                            args: vec![],
+                            name: Some("cnt".into()),
+                        }],
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        if !result.is_array() {
+            return Err(Error::new(Code::Internal, "Expected array".to_string()));
+        }
+
+        let lookup: HashMap<&Cow<str>, usize> = index_values
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k, i))
+            .collect();
+        let mut counts = vec![0; index.len()];
+
+        let result = result.into_array();
+        if result.len() < 2 {
+            return Ok(counts);
+        }
+
+        result
+            .into_iter()
+            .skip(1)
+            .map(|map| map.into_map().unwrap())
+            .for_each(|map| {
+                let key = map
+                    .get(&RedisKey::from_static_str(K::INDEX_NAME))
+                    .err_tip(|| "Missing index field in RedisStore::count_by_index")
+                    .unwrap();
+
+                let cnt_value = map
+                    .get(&RedisKey::from_static_str("cnt"))
+                    .err_tip(|| "Missing 'cnt' field in RedisStore::count_by_index")
+                    .unwrap();
+
+                let count = cnt_value
+                    .as_usize()
+                    .err_tip(|| "Count value is not an integer in RedisStore::count_by_index")
+                    .unwrap();
+
+                let val = lookup.get(&key.as_str().unwrap()).unwrap_or(&0);
+                counts[val.clone()] = count;
+            });
+        Ok(counts)
     }
 
     async fn search_by_index_prefix<K>(
