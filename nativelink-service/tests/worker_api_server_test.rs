@@ -155,6 +155,7 @@ async fn setup_api_server(worker_timeout: u64, now_fn: NowFn) -> Result<TestCont
         WorkerAllocationStrategy::default(),
         tasks_or_worker_change_notify,
         worker_timeout,
+        "test_scheduler",
     );
 
     let mut schedulers: HashMap<String, Arc<dyn WorkerScheduler>> = HashMap::new();

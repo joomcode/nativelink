@@ -120,6 +120,9 @@ pub trait ClientStateManager: Sync + Send + Unpin + MetricsComponent + 'static {
     // into a KnownPlatformPropertyProvider instead. Rust currently does not support
     // casting traits to other traits.
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider>;
+
+    /// Returns the implementation as `Any` so that it can be downcast to a concrete type.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// The type of update to perform on an operation.
