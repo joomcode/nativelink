@@ -42,11 +42,12 @@ use tokio::time::Duration;
 use tracing::{error, info, info_span};
 
 use crate::api_worker_scheduler::ApiWorkerScheduler;
-use crate::awaited_action_db::{AwaitedActionDb, CLIENT_KEEPALIVE_DURATION};
+use crate::awaited_action_db::{AwaitedAction, AwaitedActionDb, CLIENT_KEEPALIVE_DURATION};
 use crate::platform_property_manager::PlatformPropertyManager;
-use crate::simple_scheduler_state_manager::SimpleSchedulerStateManager;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerTimestamp};
+use crate::simple_scheduler_state_manager::{SchedulerStateManager, SimpleSchedulerStateManager};
+use crate::worker::{ActionInfoWithProps, ActionsState, Worker, WorkerState, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
+use serde::Serialize;
 
 /// Default timeout for workers in seconds.
 /// If this changes, remember to change the documentation in the config.
@@ -60,6 +61,12 @@ const DEFAULT_CLIENT_ACTION_TIMEOUT_S: u64 = 60;
 /// Default times a job can retry before failing.
 /// If this changes, remember to change the documentation in the config.
 const DEFAULT_MAX_JOB_RETRIES: usize = 3;
+
+#[derive(Serialize)]
+pub struct SchedulerState {
+    pub actions: ActionsState,
+    pub workers: Vec<WorkerState>,
+}
 
 struct SimpleSchedulerActionStateResult {
     client_operation_id: OperationId,
@@ -124,6 +131,10 @@ pub struct SimpleScheduler {
     /// Manager for client state of this scheduler.
     #[metric(group = "client_state_manager")]
     client_state_manager: Arc<dyn ClientStateManager>,
+
+    /// Manager for scheduler state of this scheduler.
+    #[metric(group = "scheduler_state_manager")]
+    scheduler_state_manager: Arc<dyn SchedulerStateManager>,
 
     /// Manager for platform of this scheduler.
     #[metric(group = "platform_properties")]
@@ -404,6 +415,7 @@ impl SimpleScheduler {
             Duration::from_secs(client_action_timeout_s),
             awaited_action_db,
             now_fn,
+            "simple_scheduler",
         );
 
         let worker_scheduler = ApiWorkerScheduler::new(
@@ -412,6 +424,7 @@ impl SimpleScheduler {
             spec.allocation_strategy,
             worker_change_notify.clone(),
             worker_timeout_s,
+            "simple_scheduler",
         );
 
         let worker_scheduler_clone = worker_scheduler.clone();
@@ -552,6 +565,7 @@ impl SimpleScheduler {
             Self {
                 matching_engine_state_manager: state_manager.clone(),
                 client_state_manager: state_manager.clone(),
+                scheduler_state_manager: state_manager,
                 worker_scheduler,
                 platform_property_manager,
                 maybe_origin_event_tx,
@@ -583,6 +597,10 @@ impl ClientStateManager for SimpleScheduler {
 
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         Some(self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
