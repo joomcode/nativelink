@@ -168,6 +168,10 @@ impl ClientStateManager for PropertyModifierScheduler {
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         Some(self)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl RootMetricsComponent for PropertyModifierScheduler {}

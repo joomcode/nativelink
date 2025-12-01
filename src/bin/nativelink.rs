@@ -44,6 +44,7 @@ use nativelink_service::execution_server::ExecutionServer;
 use nativelink_service::fetch_server::FetchServer;
 use nativelink_service::health_server::HealthServer;
 use nativelink_service::push_server::PushServer;
+use nativelink_service::scheduler_state_service::SchedulerStateService;
 use nativelink_service::worker_api_server::WorkerApiServer;
 use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
@@ -408,6 +409,16 @@ async fn inner_main(
                         },
                     ),
                 ),
+            );
+        }
+
+        if !action_schedulers.is_empty() {
+            let scheduler_state_service =
+                Arc::new(SchedulerStateService::new(action_schedulers.clone()));
+            svc = svc.route(
+                "/scheduler/{instance_name}/state",
+                axum::routing::get(SchedulerStateService::get_scheduler_state_handler)
+                    .with_state(scheduler_state_service),
             );
         }
 

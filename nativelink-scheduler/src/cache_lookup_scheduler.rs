@@ -381,6 +381,10 @@ impl ClientStateManager for CacheLookupScheduler {
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         self.action_scheduler.as_known_platform_property_provider()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl RootMetricsComponent for CacheLookupScheduler {}

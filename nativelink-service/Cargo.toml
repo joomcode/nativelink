@@ -14,7 +14,7 @@ nativelink-scheduler = { path = "../nativelink-scheduler" }
 nativelink-store = { path = "../nativelink-store" }
 nativelink-util = { path = "../nativelink-util" }
 
-axum = { version = "0.8.3", default-features = false }
+axum = { version = "0.8.3", default-features = false, features = ["tokio"]}
 bytes = { version = "1.10.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 http-body-util = { version = "0.1.3", default-features = false }

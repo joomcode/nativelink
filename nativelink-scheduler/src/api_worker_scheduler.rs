@@ -35,7 +35,7 @@ use tonic::async_trait;
 use tracing::{error, info, warn};
 
 use crate::platform_property_manager::PlatformPropertyManager;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerTimestamp, WorkerUpdate};
+use crate::worker::{ActionInfoWithProps, Worker, WorkerState, WorkerTimestamp, WorkerUpdate};
 use crate::worker_scheduler::WorkerScheduler;
 
 #[derive(Debug)]
@@ -507,6 +507,11 @@ impl ApiWorkerScheduler {
             make_input_err!("WorkerId '{}' does not exist in workers map", worker_id)
         })?;
         worker.keep_alive()
+    }
+
+    pub async fn get_workers_state(&self) -> Vec<WorkerState> {
+        let inner = self.inner.lock().await;
+        inner.workers.iter().map(|(_, w)| w.to_state()).collect()
     }
 }
 

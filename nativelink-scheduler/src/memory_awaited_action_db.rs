@@ -579,6 +579,12 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync> AwaitedActionDbI
         }
     }
 
+    fn count_actions(&mut self, stage: ActionStage) -> usize {
+        self.sorted_action_info_hash_keys
+            .btree_for_state(&stage)
+            .len()
+    }
+
     fn update_awaited_action(
         &mut self,
         mut new_awaited_action: AwaitedAction,
@@ -963,6 +969,10 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
                 Ok(Some(((new_start.cloned(), new_end.cloned()), output)))
             },
         ))
+    }
+
+    async fn count_actions(&self, stage: ActionStage) -> Result<usize, Error> {
+        Ok(self.inner.lock().await.count_actions(stage))
     }
 
     async fn update_awaited_action(&self, new_awaited_action: AwaitedAction) -> Result<(), Error> {

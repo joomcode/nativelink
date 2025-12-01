@@ -173,6 +173,8 @@ pub trait AwaitedActionDb: Send + Sync + MetricsComponent + Unpin + 'static {
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<Self::Subscriber, Error>> + Send, Error>,
     > + Send;
+    
+    fn count_actions(&self, state: ActionStage) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Process a change changed `AwaitedAction` and notify any listeners.
     fn update_awaited_action(

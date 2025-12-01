@@ -1015,6 +1015,10 @@ impl AwaitedActionDb for RxMockAwaitedAction {
     ) -> Result<Self::Subscriber, Error> {
         unreachable!();
     }
+
+    async fn count_actions(&self, _state: ActionStage) -> Result<usize, Error> {
+        Ok(0)
+    }
 }
 
 #[nativelink_test]
