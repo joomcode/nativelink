@@ -158,6 +158,7 @@ async fn setup_api_server(worker_timeout: u64, now_fn: NowFn) -> Result<TestCont
         tasks_or_worker_change_notify,
         worker_timeout,
         worker_registry,
+        "test_scheduler",
     );
 
     let mut schedulers: HashMap<String, Arc<dyn WorkerScheduler>> = HashMap::new();

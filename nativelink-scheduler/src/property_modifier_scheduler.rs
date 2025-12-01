@@ -32,7 +32,7 @@ use parking_lot::Mutex;
 pub struct PropertyModifierScheduler {
     modifications: Vec<PropertyModification>,
     #[metric(group = "scheduler")]
-    scheduler: Arc<dyn ClientStateManager>,
+    pub scheduler: Arc<dyn ClientStateManager>,
     #[metric(group = "property_manager")]
     known_properties: Mutex<HashMap<String, Vec<String>>>,
 }
@@ -167,6 +167,10 @@ impl ClientStateManager for PropertyModifierScheduler {
 
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         Some(self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

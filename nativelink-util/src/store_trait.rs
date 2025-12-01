@@ -924,6 +924,13 @@ pub trait SchedulerStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<<K as SchedulerStoreDecodeTo>::DecodeOutput>, Error>> + Send
     where
         K: SchedulerStoreKeyProvider + SchedulerStoreDecodeTo + Send;
+
+    fn count_by_index<K>(
+        &self,
+        index: Vec<K>,
+    ) -> impl Future<Output = Result<Vec<usize>, Error>> + Send
+    where
+        K: SchedulerIndexProvider + Send;
 }
 
 /// A type that is used to let the scheduler store know what
