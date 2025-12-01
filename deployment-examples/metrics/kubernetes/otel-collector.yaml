@@ -52,7 +52,7 @@ data:
         enable_open_metrics: true
 
       otlphttp/prometheus:
-        endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+        endpoint: http://prometheus:9090/api/v1/otlp
         compression: gzip
 
     extensions:
