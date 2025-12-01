@@ -354,6 +354,10 @@ impl ClientStateManager for GrpcScheduler {
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         Some(self)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[async_trait]
