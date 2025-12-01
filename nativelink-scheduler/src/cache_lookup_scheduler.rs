@@ -65,7 +65,7 @@ pub struct CacheLookupScheduler {
     /// The "real" scheduler to use to perform actions if they were not found
     /// in the action cache.
     #[metric(group = "action_scheduler")]
-    action_scheduler: Arc<dyn ClientStateManager>,
+    pub action_scheduler: Arc<dyn ClientStateManager>,
     /// Actions that are currently performing a `CacheCheck`.
     inflight_cache_checks: Arc<Mutex<CheckActions>>,
 }
@@ -380,6 +380,10 @@ impl ClientStateManager for CacheLookupScheduler {
 
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         self.action_scheduler.as_known_platform_property_provider()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
