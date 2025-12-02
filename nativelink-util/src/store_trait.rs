@@ -918,8 +918,8 @@ pub trait SchedulerStore: Send + Sync + 'static {
 
     fn count_by_index<K>(
         &self,
-        index: K,
-    ) -> impl Future<Output = Result<usize, Error>> + Send
+        index: Vec<K>,
+    ) -> impl Future<Output = Result<Vec<usize>, Error>> + Send
     where
         K: SchedulerIndexProvider + Send;
 }

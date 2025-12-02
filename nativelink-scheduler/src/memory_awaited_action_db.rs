@@ -971,8 +971,12 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
         ))
     }
 
-    async fn count_actions(&self, stage: ActionStage) -> Result<usize, Error> {
-        Ok(self.inner.lock().await.count_actions(stage))
+    async fn count_actions(&self, stages: Vec<ActionStage>) -> Result<Vec<usize>, Error> {
+        let mut results = Vec::with_capacity(stages.len());
+        for stage in stages {
+            results.push(self.inner.lock().await.count_actions(stage));
+        }
+        Ok(results)
     }
 
     async fn update_awaited_action(&self, new_awaited_action: AwaitedAction) -> Result<(), Error> {

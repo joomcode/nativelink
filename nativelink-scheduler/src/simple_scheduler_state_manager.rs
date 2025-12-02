@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::ops::Bound;
-use core::time::Duration;
-use std::string::ToString;
-use std::sync::{Arc, Weak};
-
+use super::awaited_action_db::{
+    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, SortedAwaitedActionState,
+};
+use crate::worker::ActionsState;
 use async_lock::Mutex;
 use async_trait::async_trait;
+use core::ops::Bound;
+use core::time::Duration;
 use futures::{StreamExt, TryStreamExt, stream};
+use nativelink_config::stores::StoreType::Ac;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_metric::MetricsComponent;
 use nativelink_util::action_messages::{
@@ -33,11 +35,10 @@ use nativelink_util::operation_state_manager::{
     OperationFilter, OperationStageFlags, OrderDirection, UpdateOperationType, WorkerStateManager,
 };
 use nativelink_util::origin_event::OriginMetadata;
+use std::string::ToString;
+use std::sync::{Arc, Weak};
+use std::vec;
 use tracing::{info, warn};
-
-use super::awaited_action_db::{
-    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, SortedAwaitedActionState,
-};
 
 /// Maximum number of times an update to the database
 /// can fail before giving up.
@@ -308,6 +309,40 @@ where
             timeout_operation_mux: Mutex::new(()),
             weak_self: weak_self.clone(),
             now_fn,
+        })
+    }
+
+    pub async fn get_executing_actions_state(&self) -> Result<ActionsState, Error> {
+        let counts = self
+            .action_db
+            .count_actions(vec![
+                ActionStage::Executing,
+                ActionStage::Queued,
+                ActionStage::Completed(ActionResult::default()),
+            ])
+            .await?;
+        let executing_actions = self
+            .action_db
+            .get_range_of_actions(
+                SortedAwaitedActionState::Executing,
+                Bound::Unbounded,
+                Bound::Unbounded,
+                true,
+            )
+            .await
+            .err_tip(|| "In SimpleSchedulerStateManager::get_actions_state")?
+            .and_then(|subscriber| async move {
+                let awaited_action = subscriber.borrow().await?;
+                Ok(awaited_action.clone())
+            })
+            .try_collect()
+            .await?;
+
+        Ok(ActionsState {
+            executing: counts[0],
+            queued: counts[1],
+            completed: counts[2],
+            executing_actions,
         })
     }
 
@@ -848,6 +883,23 @@ where
 }
 
 #[async_trait]
+pub trait SchedulerStateManager: MatchingEngineStateManager + ClientStateManager {
+    async fn get_actions_state(&self) -> Result<ActionsState, Error>;
+}
+
+#[async_trait]
+impl<T, I, NowFn> SchedulerStateManager for SimpleSchedulerStateManager<T, I, NowFn>
+where
+    T: AwaitedActionDb,
+    I: InstantWrapper,
+    NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
+{
+    async fn get_actions_state(&self) -> Result<ActionsState, Error> {
+        self.get_executing_actions_state().await
+    }
+}
+
+#[async_trait]
 impl<T, I, NowFn> ClientStateManager for SimpleSchedulerStateManager<T, I, NowFn>
 where
     T: AwaitedActionDb,
@@ -888,6 +940,10 @@ where
 
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
         None
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

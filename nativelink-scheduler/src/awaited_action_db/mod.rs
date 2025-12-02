@@ -15,6 +15,7 @@
 use core::cmp;
 use core::ops::Bound;
 use core::time::Duration;
+use std::iter::Map;
 use std::sync::Arc;
 
 pub use awaited_action::{AwaitedAction, AwaitedActionSortKey};
@@ -174,7 +175,7 @@ pub trait AwaitedActionDb: Send + Sync + MetricsComponent + Unpin + 'static {
         Output = Result<impl Stream<Item = Result<Self::Subscriber, Error>> + Send, Error>,
     > + Send;
     
-    fn count_actions(&self, state: ActionStage) -> impl Future<Output = Result<usize, Error>> + Send;
+    fn count_actions(&self, states: Vec<ActionStage>) -> impl Future<Output = Result<Vec<usize>, Error>> + Send;
 
     /// Process a change changed `AwaitedAction` and notify any listeners.
     fn update_awaited_action(

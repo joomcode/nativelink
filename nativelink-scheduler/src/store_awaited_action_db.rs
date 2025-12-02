@@ -832,4 +832,20 @@ where
                 )
             }))
     }
+
+    async fn count_actions(&self, states: Vec<ActionStage>) -> Result<Vec<usize>, Error> {
+        let prefixes: Vec<SearchStateToAwaitedAction> = states
+            .iter()
+            .map(|s| {
+                SearchStateToAwaitedAction(get_state_prefix(
+                    SortedAwaitedActionState::try_from(s).unwrap(),
+                ))
+            })
+            .collect();
+
+        self.store
+            .count_by_index(prefixes)
+            .await
+            .err_tip(|| "In RedisAwaitedActionDb::count_actions")
+    }
 }

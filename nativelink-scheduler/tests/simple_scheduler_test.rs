@@ -1016,8 +1016,8 @@ impl AwaitedActionDb for RxMockAwaitedAction {
         unreachable!();
     }
 
-    async fn count_actions(&self, _state: ActionStage) -> Result<usize, Error> {
-        Ok(0)
+    async fn count_actions(&self, _states: Vec<ActionStage>) -> Result<Vec<usize>, Error> {
+        Ok(vec![0])
     }
 }
 

@@ -1103,4 +1103,11 @@ impl SchedulerStore for ExperimentalMongoStore {
             make_err!(Code::Internal, "Failed to decode in get_and_decode: {e}")
         })?))
     }
+
+    async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send
+    {
+        Ok(vec![0; index.len()])
+    }
 }
