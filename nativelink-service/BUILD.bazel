@@ -22,6 +22,7 @@ rust_library(
         "src/push_server.rs",
         "src/remote_asset_proto.rs",
         "src/worker_api_server.rs",
+        "src/scheduler_state_service.rs",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -43,6 +44,7 @@ rust_library(
         "@crates//:prost-types",
         "@crates//:rand",
         "@crates//:serde_json5",
+        "@crates//:serde_json",
         "@crates//:sha2",
         "@crates//:tokio",
         "@crates//:tonic",
