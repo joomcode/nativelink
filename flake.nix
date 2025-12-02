@@ -224,6 +224,41 @@
 
         nativelink-worker-init = pkgs.callPackage ./tools/nativelink-worker-init.nix {inherit buildImage self nativelink-image;};
 
+        scheduler-dashboard-image = buildImage {
+          name = "scheduler-dashboard";
+          copyToRoot = [
+            (pkgs.buildEnv {
+              name = "scheduler-dashboard-buildEnv";
+              paths = [
+                pkgs.python312
+                (pkgs.writeTextDir "app/index.html" (builtins.readFile ./scheduler-dashboard/index.html))
+                (pkgs.writeTextDir "app/server.py" (builtins.readFile ./scheduler-dashboard/server.py))
+              ];
+              pathsToLink = ["/bin" "/lib" "/app"];
+            })
+          ];
+          config = {
+            Entrypoint = ["python3" "/app/server.py"];
+            WorkingDir = "/app";
+            ExposedPorts = {
+              "8080/tcp" = {};
+            };
+            Env = [
+              "PORT=8080"
+              "SCHEDULER_URL=http://localhost:50051"
+            ];
+            Labels = {
+              "org.opencontainers.image.description" = "Web dashboard for monitoring NativeLink scheduler state";
+              "org.opencontainers.image.documentation" = "https://github.com/TraceMachina/nativelink";
+              "org.opencontainers.image.licenses" = "FSL-1.1-Apache-2.0";
+              "org.opencontainers.image.revision" = "${self.rev or self.dirtyRev or "dirty"}";
+              "org.opencontainers.image.source" = "https://github.com/TraceMachina/nativelink";
+              "org.opencontainers.image.title" = "NativeLink Scheduler Dashboard";
+              "org.opencontainers.image.vendor" = "Trace Machina, Inc.";
+            };
+          };
+        };
+
         createWorker = pkgs.nativelink-tools.lib.createWorker self;
 
         buck2-toolchain = let
@@ -349,6 +384,7 @@
               nativelink-is-executable-test
               nativelink-worker-init
               nativelink-x86_64-linux
+              scheduler-dashboard-image
               ;
 
             # Used by the CI

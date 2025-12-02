@@ -1,4 +1,4 @@
-FROM jfrog.joom.it/dockerhub-proxy/python:3.12-alpine
+FROM python:3.12-alpine
 
 LABEL org.opencontainers.image.title="NativeLink Scheduler Dashboard"
 LABEL org.opencontainers.image.description="Web dashboard for monitoring NativeLink scheduler state"
