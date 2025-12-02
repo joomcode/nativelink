@@ -65,7 +65,7 @@ pub struct PendingActionInfoData {
 pub struct WorkerState {
     pub id: WorkerId,
     pub platform_properties: PlatformProperties,
-    pub running_action_infos: HashMap<OperationId, PendingActionInfoData>,
+    pub running_action_infos: HashMap<String, PendingActionInfoData>,
     pub last_update_timestamp: WorkerTimestamp,
     pub is_paused: bool,
     pub is_draining: bool,
@@ -298,7 +298,7 @@ impl Worker {
         WorkerState {
             id: self.id.clone(),
             platform_properties: self.platform_properties.clone(),
-            running_action_infos: self.running_action_infos.clone(),
+            running_action_infos: self.running_action_infos.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
             last_update_timestamp: self.last_update_timestamp,
             is_paused: self.is_paused,
             is_draining: self.is_draining,

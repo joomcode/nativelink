@@ -29,7 +29,7 @@ impl SchedulerStateService {
             let event = if let Some(scheduler) = service.schedulers.get(&instance_name) {
                 if let Some(simple_scheduler) = scheduler.as_any().downcast_ref::<SimpleScheduler>() {
                     match simple_scheduler.get_scheduler_state().await {
-                        Ok(state) => match serde_json5::to_string(&state) {
+                        Ok(state) => match serde_json::to_string(&state) {
                             Ok(json) => Event::default().data(json),
                             Err(err) => {
                                 error!("Failed to serialize: {err}");
