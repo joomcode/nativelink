@@ -820,7 +820,7 @@ where
     ) -> Result<impl Stream<Item = Result<Self::Subscriber, Error>>, Error> {
         Ok(self
             .store
-            .search_by_index_prefix(SearchStateToAwaitedAction(""))
+            .search_by_index_prefix(SearchStateToAwaitedAction("queued|cache_check|executing"))
             .await
             .err_tip(|| "In RedisAwaitedActionDb::get_range_of_actions")?
             .map_ok(move |awaited_action| {

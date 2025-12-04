@@ -966,7 +966,7 @@ const fn try_sanitize(s: &str) -> Option<&str> {
             break;
         }
         let c = chars[i];
-        if !c.is_ascii_alphanumeric() && c != b'_' {
+        if !c.is_ascii_alphanumeric() && c != b'_' && c != b'|' {
             return None;
         }
         i += 1;
