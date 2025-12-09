@@ -16,13 +16,12 @@ use super::awaited_action_db::{
     AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CountableActionStage,
     SortedAwaitedActionState,
 };
-use crate::worker::ActionsState;
 use async_lock::Mutex;
 use async_trait::async_trait;
 use core::ops::Bound;
 use core::time::Duration;
-use futures::{StreamExt, TryFutureExt, TryStreamExt, stream};
-use nativelink_error::{Code, Error, ResultExt, make_err};
+use futures::{stream, StreamExt, TryStreamExt};
+use nativelink_error::{make_err, Code, Error, ResultExt};
 use nativelink_metric::MetricsComponent;
 use nativelink_util::action_messages::{
     ActionInfo, ActionResult, ActionStage, ActionState, ActionUniqueQualifier, ExecutionMetadata,
@@ -31,7 +30,8 @@ use nativelink_util::action_messages::{
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::metrics::{
-    EXECUTION_INSTANCE, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionResult,
+    register_queued_actions_callback, ExecutionMetricAttrs, ExecutionResult, EXECUTION_INSTANCE,
+    EXECUTION_METRICS,
 };
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, MatchingEngineStateManager,
@@ -40,11 +40,10 @@ use nativelink_util::operation_state_manager::{
 use nativelink_util::origin_event::OriginMetadata;
 use opentelemetry::KeyValue;
 use std::collections::{BTreeMap, HashMap};
-use std::iter::Map;
 use std::string::ToString;
 use std::sync::{Arc, Weak};
 use std::{env, vec};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 /// Maximum number of times an update to the database
 /// can fail before giving up.
@@ -64,38 +63,6 @@ impl SchedulerMetrics {
         Self {
             attrs: ExecutionMetricAttrs::new(&base_attrs),
             instance_name,
-        }
-    }
-
-    pub fn record_queued_actions(&self, action_infos: Vec<Arc<AwaitedAction>>) {
-        let count_by_properties = action_infos
-            .iter()
-            .map(|awaitedAction| {
-                awaitedAction.action_info().platform_properties
-                    .clone()
-                    .into_iter()
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .fold(HashMap::new(), |mut acc, platform_properties| {
-                *acc.entry(platform_properties).or_insert(0) += 1;
-                acc
-            });
-
-        info!("Found {} queued actions with {} unique properties", action_infos.len(), count_by_properties.len());
-
-        for (platform_properties, count) in count_by_properties {
-            let mut attrs = platform_properties
-                .iter()
-                .map(|(key, value)| KeyValue::new(key.clone(), value.clone()))
-                .collect::<Vec<KeyValue>>();
-
-            attrs.push(KeyValue::new(
-                EXECUTION_INSTANCE,
-                self.instance_name.clone(),
-            ));
-            EXECUTION_METRICS
-                .execution_queued_actions_count
-                .record(count, &attrs);
         }
     }
 
@@ -458,6 +425,86 @@ where
     /// Provides pre-computed attributes and methods for recording metrics
     /// related to action execution lifecycle.
     scheduler_metrics: SchedulerMetrics,
+
+    queued_actions_tracker: Arc<QueuedActionsTracker<T, I, NowFn>>,
+}
+
+#[derive(Debug)]
+struct QueuedActionsTracker<T, I, NowFn>
+where
+    T: AwaitedActionDb,
+    I: InstantWrapper,
+    NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
+{
+    simple_scheduler_state_manager: Weak<SimpleSchedulerStateManager<T, I, NowFn>>,
+    queued_actions: Arc<tokio::sync::Mutex<Vec<(u64, Vec<KeyValue>)>>>,
+}
+
+impl<T, I, NowFn> QueuedActionsTracker<T, I, NowFn>
+where
+    T: AwaitedActionDb,
+    I: InstantWrapper,
+    NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
+{
+    fn new(simple_scheduler_state_manager: Weak<SimpleSchedulerStateManager<T, I, NowFn>>) -> Self {
+        let queued_actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        Self {
+            simple_scheduler_state_manager,
+            queued_actions,
+        }
+    }
+
+    fn dump_queued_actions(&self, observer: impl Fn(u64, &[KeyValue])) {
+        if let Ok(queued_actions) = self.queued_actions.try_lock() {
+            for (count, attrs) in queued_actions.iter() {
+                observer(*count, attrs);
+            }
+        }
+    }
+
+    async fn count_queued_actions(&self) {
+        if let Some(manager) = self.simple_scheduler_state_manager.upgrade() {
+            let action_infos = manager
+                .action_db
+                .get_queued_actions()
+                .await
+                .err_tip(|| "In SimpleSchedulerStateManager::record_actions_count")
+                .unwrap_or_default();
+
+            let count_by_properties = action_infos
+                .iter()
+                .map(|awaitedAction| {
+                    awaitedAction
+                        .action_info()
+                        .platform_properties
+                        .clone()
+                        .into_iter()
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .fold(HashMap::new(), |mut acc, platform_properties| {
+                    *acc.entry(platform_properties).or_insert(0) += 1;
+                    acc
+                });
+
+            let mut queued_actions = self.queued_actions.lock().await;
+            queued_actions.clear();
+
+            for (platform_properties, count) in count_by_properties {
+                let mut attrs = platform_properties
+                    .iter()
+                    .map(|(key, value)| KeyValue::new(key.clone(), value.clone()))
+                    .collect::<Vec<KeyValue>>();
+
+                attrs.push(KeyValue::new(
+                    EXECUTION_INSTANCE,
+                    manager.scheduler_metrics.instance_name.clone(),
+                ));
+
+                queued_actions.push((count, attrs));
+            }
+        }
+    }
 }
 
 impl<T, I, NowFn> SimpleSchedulerStateManager<T, I, NowFn>
@@ -474,7 +521,7 @@ where
         now_fn: NowFn,
         instance_name: impl Into<String>,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|weak_self| Self {
+        let res = Arc::new_cyclic(|weak_self| Self {
             action_db,
             max_job_retries,
             no_event_action_timeout,
@@ -483,7 +530,14 @@ where
             weak_self: weak_self.clone(),
             now_fn,
             scheduler_metrics: SchedulerMetrics::new(instance_name),
-        })
+            queued_actions_tracker: Arc::new(QueuedActionsTracker::new(weak_self.clone())),
+        });
+        let queued_actions_tracker_clone = res.queued_actions_tracker.clone();
+        register_queued_actions_callback(Box::new(move |observe| {
+            queued_actions_tracker_clone.dump_queued_actions(observe);
+        }));
+
+        res
     }
 
     /// Returns a reference to the scheduler metrics for recording OTEL metrics.
@@ -1182,16 +1236,7 @@ where
         }
 
         if env::var("NATIVELINK_COUNT_QUEUED_ACTIONS").unwrap_or_default() == "1" {
-            let action_infos = self
-                .action_db
-                .get_queued_actions()
-                .await
-                .err_tip(|| "In SimpleSchedulerStateManager::record_actions_count")
-                .unwrap_or_default();
-
-            info!("Found {} queued actions", action_infos.len());
-
-            self.scheduler_metrics.record_queued_actions(action_infos);
+            self.queued_actions_tracker.count_queued_actions().await;
         }
     }
 }

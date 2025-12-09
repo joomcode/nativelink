@@ -12,10 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
 use crate::action_messages::ActionStage;
+
+/// Callback type for observable gauges that report queued action counts.
+/// The callback receives an `Observer` that should be used to record values with attributes.
+pub type QueuedActionsCallback = Box<dyn Fn(&dyn Fn(u64, &[KeyValue])) + Send + Sync>;
+
+/// Storage for the external callback for queued actions count.
+static QUEUED_ACTIONS_CALLBACK: OnceLock<QueuedActionsCallback> = OnceLock::new();
+
+/// Registers an external callback for the `execution_queued_actions_count` observable gauge.
+///
+/// This function can only be called once. Subsequent calls will panic.
+///
+/// The callback will be invoked during metrics collection and should report
+/// the current count of queued actions by calling the provided observer function
+/// with the count and any relevant attributes (e.g., platform properties).
+///
+/// # Panics
+///
+/// Panics if the callback has already been registered.
+///
+/// # Example
+/// ```ignore
+/// register_queued_actions_callback(Box::new(|observe| {
+///     // Report counts for different platform configurations
+///     observe(10, &[KeyValue::new("platform", "linux")]);
+///     observe(5, &[KeyValue::new("platform", "windows")]);
+/// }));
+/// ```
+pub fn register_queued_actions_callback(callback: QueuedActionsCallback) {
+    if QUEUED_ACTIONS_CALLBACK.set(callback).is_err() {
+        panic!("Queued actions callback can only be registered once");
+    }
+}
 
 // Metric attribute keys for remote execution operations.
 pub const EXECUTION_STAGE: &str = "execution_stage";
@@ -311,9 +344,16 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_queued_actions_count: meter
-            .u64_gauge("execution_queued_actions_count")
+            .u64_observable_gauge("execution_queued_actions_count_observable")
             .with_description("Current number of queued actions by platform properties")
             .with_unit("{action}")
+            .with_callback(|observer| {
+                if let Some(callback) = QUEUED_ACTIONS_CALLBACK.get() {
+                    callback(&|value, attrs| {
+                        observer.observe(value, attrs);
+                    });
+                }
+            })
             .build(),
     }
 });
@@ -338,7 +378,7 @@ pub struct ExecutionMetrics {
     /// Gauge of actions by stage
     pub execution_actions_count: metrics::Gauge<u64>,
     // Gauge of queued actions by platform properties
-    pub execution_queued_actions_count: metrics::Gauge<u64>,
+    pub execution_queued_actions_count: metrics::ObservableGauge<u64>,
 }
 
 /// Helper function to create attributes for execution metrics
