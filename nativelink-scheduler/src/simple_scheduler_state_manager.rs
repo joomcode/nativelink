@@ -589,22 +589,22 @@ where
                         let total_execution_duration = execution_metadata
                             .worker_completed_timestamp
                             .duration_since(execution_metadata.worker_start_timestamp)
-                            .unwrap();
+                            .unwrap_or(Duration::ZERO);
 
                         let queue_duration = execution_metadata
                             .worker_start_timestamp // which is the start of execution
                             .duration_since(execution_metadata.queued_timestamp)
-                            .unwrap();
+                            .unwrap_or(Duration::ZERO);
 
                         let fetch_duration = execution_metadata
                             .input_fetch_completed_timestamp
                             .duration_since(execution_metadata.input_fetch_start_timestamp)
-                            .unwrap();
+                            .unwrap_or(Duration::ZERO);
 
                         let execution_duration = execution_metadata
                             .execution_completed_timestamp
                             .duration_since(execution_metadata.execution_start_timestamp)
-                            .unwrap();
+                            .unwrap_or(Duration::ZERO);
 
                         EXECUTION_METRICS.execution_stage_duration.record(
                             fetch_duration.as_secs_f64(),
