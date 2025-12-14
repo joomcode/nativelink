@@ -63,7 +63,7 @@ impl NativelinkOperationId {
 
     fn from_name(name: &str) -> Result<Self, Error> {
         let (instance_name, name) = name
-            .rsplit_once('/')
+            .split_once('/')
             .err_tip(|| "Expected instance_name and name to be separated by '/'")?;
         Ok(Self::new(
             instance_name.to_string(),
