@@ -14,8 +14,8 @@
 
 use nativelink_util::action_messages::{ActionResult, ActionStage};
 use nativelink_util::metrics::{
-    CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage, WORKER_METRICS,
-    make_execution_attributes,
+    CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage,
+    WORKER_METRICS, make_execution_attributes,
 };
 use opentelemetry::KeyValue;
 
