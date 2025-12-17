@@ -26,7 +26,9 @@ use std::sync::{Arc, Weak};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, StreamExt, TryFutureExt, select};
-use nativelink_config::cas_server::{EnvironmentSource, LocalWorkerConfig};
+use nativelink_config::cas_server::{
+    EnvironmentSource, ExecutionCompletionBehaviour, LocalWorkerConfig,
+};
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::update_for_worker::Update;
@@ -44,6 +46,7 @@ use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::Store;
 use nativelink_util::{spawn, tls_utils};
 use opentelemetry::context::Context;
+use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::{broadcast, mpsc};
 use tokio::{process, time};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -91,6 +94,7 @@ struct LocalWorkerImpl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsM
     // on by the scheduler.
     actions_in_transit: Arc<AtomicU64>,
     metrics: Arc<Metrics>,
+    shutdown_tx: Sender<ShutdownGuard>,
 }
 
 pub async fn preconditions_met<H: BuildHasher + Sync>(
@@ -151,6 +155,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
         worker_id: String,
         running_actions_manager: Arc<U>,
         metrics: Arc<Metrics>,
+        shutdown_tx: Sender<ShutdownGuard>,
     ) -> Self {
         Self {
             config,
@@ -163,6 +168,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
             // on by the scheduler.
             actions_in_transit: Arc::new(AtomicU64::new(0)),
             metrics,
+            shutdown_tx,
         }
     }
 
@@ -225,6 +231,8 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
 
         let (add_future_channel, add_future_rx) = mpsc::unbounded_channel();
         let mut add_future_rx = UnboundedReceiverStream::new(add_future_rx).fuse();
+        let (inner_shutdown_channel, inner_shutdown_rx) = mpsc::unbounded_channel();
+        let mut inner_shutdown_rx = UnboundedReceiverStream::new(inner_shutdown_rx).fuse();
 
         let mut update_for_worker_stream = update_for_worker_stream.fuse();
         // A notify which is triggered every time actions_in_flight is subtracted.
@@ -234,6 +242,9 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
         let actions_in_flight = Arc::new(AtomicU64::new(0));
         // Set to true when shutting down, this stops any new StartAction.
         let mut shutting_down = false;
+        // Channel to signal when shutdown is complete (GoingAway sent, ready to exit).
+        let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::unbounded_channel::<()>();
+        let mut shutdown_complete_rx = UnboundedReceiverStream::new(shutdown_complete_rx).fuse();
 
         loop {
             select! {
@@ -439,6 +450,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                             self.actions_in_transit.fetch_add(1, Ordering::Release);
 
                             let add_future_channel = add_future_channel.clone();
+                            let inner_shutdown_channel = inner_shutdown_channel.clone();
 
                             info_span!(
                                 "worker_start_action_ctx",
@@ -461,7 +473,16 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                                             error!(?err, "Error executing action");
                                         }
                                         add_future_channel
-                                            .send(make_publish_future(res).then(move |res| {
+                                            .send(make_publish_future(res)
+                                        .then(move |res| {
+                                                match self.config.execution_completion_behaviour {
+                                                    ExecutionCompletionBehaviour::OneShotAlways => {
+                                                        inner_shutdown_channel.send(()).ok();
+                                                    }
+                                                    ExecutionCompletionBehaviour::Default => {
+                                                        // Do nothing
+                                                    }
+                                                }
                                                 actions_in_flight.fetch_sub(1, Ordering::Release);
                                                 actions_notify.notify_one();
                                                 core::future::ready(res)
@@ -487,7 +508,16 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                     let fut = res.err_tip(|| "New future stream receives should never be closed")?;
                     futures.push(fut);
                 },
+                _ = inner_shutdown_rx.next() => {
+                    warn!("Shutting down worker because of inner shutdown signal",);
+                    let guard = ShutdownGuard::default();
+                    drop(self.shutdown_tx.send(guard.clone()));
+                }
                 res = futures.next() => res.err_tip(|| "Keep-alive should always pending. Likely unable to send data to scheduler")??,
+                _ = shutdown_complete_rx.next() => {
+                    info!("Shutdown complete, exiting worker loop");
+                    return Ok(());
+                },
                 complete_msg = shutdown_rx.recv().fuse() => {
                     warn!("Worker loop received shutdown signal. Shutting down worker...",);
                     let mut grpc_client = self.grpc_client.clone();
@@ -495,6 +525,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                         Error::from_std_err(Code::Internal, &e).append("Failed to receive shutdown message"))?;
                     let actions_in_flight = actions_in_flight.clone();
                     let actions_notify = actions_notify.clone();
+                    let shutdown_complete_tx = shutdown_complete_tx.clone();
                     let shutdown_future = async move {
                         // Wait for in-flight operations to be fully completed.
                         while actions_in_flight.load(Ordering::Acquire) > 0 {
@@ -508,6 +539,8 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                         }
                         // Allow shutdown to occur now.
                         drop(shutdown_guard);
+                        // Signal that shutdown is complete.
+                        let _ = shutdown_complete_tx.send(());
                         Ok::<(), Error>(())
                     };
                     futures.push(shutdown_future.boxed());
@@ -818,7 +851,8 @@ impl<T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorker<T,
     #[instrument(skip(self), level = Level::INFO)]
     pub async fn run(
         mut self,
-        mut shutdown_rx: broadcast::Receiver<ShutdownGuard>,
+        shutdown_tx: Sender<ShutdownGuard>,
+        mut shutdown_rx: Receiver<ShutdownGuard>,
     ) -> Result<(), Error> {
         // Belt-and-suspenders QoS bump: the main binary already calls
         // this before runtime creation so the tokio worker threads
@@ -863,6 +897,7 @@ impl<T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorker<T,
                         worker_id,
                         self.running_actions_manager.clone(),
                         self.metrics.clone(),
+                        shutdown_tx.clone(),
                     ),
                     update_for_worker_stream,
                 ),
@@ -873,30 +908,37 @@ impl<T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorker<T,
             );
 
             // Now listen for connections and run all other services.
-            if let Err(err) = inner.run(update_for_worker_stream, &mut shutdown_rx).await {
-                'no_more_actions: {
-                    // Ensure there are no actions in transit before we try to kill
-                    // all our actions.
-                    const ITERATIONS: usize = 1_000;
-
-                    const ERROR_MSG: &str = "Actions in transit did not reach zero before we disconnected from the scheduler";
-
-                    let sleep_duration = ACTIONS_IN_TRANSIT_TIMEOUT_S / ITERATIONS as f32;
-                    for _ in 0..ITERATIONS {
-                        if inner.actions_in_transit.load(Ordering::Acquire) == 0 {
-                            break 'no_more_actions;
-                        }
-                        (sleep_fn_pin)(Duration::from_secs_f32(sleep_duration)).await;
-                    }
-                    error!(ERROR_MSG);
-                    return Err(err.append(ERROR_MSG));
+            match inner.run(update_for_worker_stream, &mut shutdown_rx).await {
+                Ok(()) => {
+                    // Graceful shutdown completed, return without retrying.
+                    info!("Worker completed graceful shutdown");
+                    return Ok(());
                 }
-                error!(?err, "Worker disconnected from scheduler");
-                // Kill off any existing actions because if we re-connect, we'll
-                // get some more and it might resource lock us.
-                self.running_actions_manager.kill_all().await;
+                Err(err) => {
+                    'no_more_actions: {
+                        // Ensure there are no actions in transit before we try to kill
+                        // all our actions.
+                        const ITERATIONS: usize = 1_000;
 
-                (error_handler)(err).await; // Try to connect again.
+                        const ERROR_MSG: &str = "Actions in transit did not reach zero before we disconnected from the scheduler";
+
+                        let sleep_duration = ACTIONS_IN_TRANSIT_TIMEOUT_S / ITERATIONS as f32;
+                        for _ in 0..ITERATIONS {
+                            if inner.actions_in_transit.load(Ordering::Acquire) == 0 {
+                                break 'no_more_actions;
+                            }
+                            (sleep_fn_pin)(Duration::from_secs_f32(sleep_duration)).await;
+                        }
+                        error!(ERROR_MSG);
+                        return Err(err.append(ERROR_MSG));
+                    }
+                    error!(?err, "Worker disconnected from scheduler");
+                    // Kill off any existing actions because if we re-connect, we'll
+                    // get some more and it might resource lock us.
+                    self.running_actions_manager.kill_all().await;
+
+                    (error_handler)(err).await; // Try to connect again.
+                }
             }
         }
         // Unreachable.

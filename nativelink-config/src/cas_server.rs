@@ -880,6 +880,17 @@ pub struct LocalWorkerConfig {
     /// error.
     /// Default: False.
     pub use_mount_namespace: Option<bool>,
+
+    #[serde(default)]
+    pub execution_completion_behaviour: ExecutionCompletionBehaviour,
+}
+
+#[derive(Deserialize, Serialize, Debug, Default, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCompletionBehaviour {
+    #[default]
+    Default,
+    OneShotAlways,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
