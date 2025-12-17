@@ -30,7 +30,7 @@ use nativelink_util::spawn;
 use nativelink_util::task::JoinHandleDropGuard;
 use nativelink_worker::local_worker::LocalWorker;
 use nativelink_worker::worker_api_client_wrapper::WorkerApiClientTrait;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tonic::Status;
 use tonic::{
     Response,
@@ -54,6 +54,7 @@ const BROADCAST_CAPACITY: usize = 1;
 enum WorkerClientApiCalls {
     ConnectWorker(ConnectWorkerRequest),
     ExecutionResponse(ExecuteResult),
+    GoingAway(GoingAwayRequest),
 }
 
 #[derive(Debug)]
@@ -64,6 +65,7 @@ enum WorkerClientApiCalls {
 enum WorkerClientApiReturns {
     ConnectWorker(Result<Response<Streaming<UpdateForWorker>>, Status>),
     ExecutionResponse(Result<(), Error>),
+    GoingAway(Result<(), Error>),
 }
 
 #[derive(Clone)]
@@ -108,6 +110,9 @@ impl MockWorkerApiClient {
             req @ WorkerClientApiCalls::ExecutionResponse(_) => {
                 panic!("expect_connect_worker expected ConnectWorker, got : {req:?}")
             }
+            req @ WorkerClientApiCalls::GoingAway(_) => {
+                panic!("expect_connect_worker expected ConnectWorker, got : {req:?}")
+            }
         };
         self.tx_resp
             .send(WorkerClientApiReturns::ConnectWorker(result))
@@ -129,9 +134,36 @@ impl MockWorkerApiClient {
             req @ WorkerClientApiCalls::ConnectWorker(_) => {
                 panic!("expect_execution_response expected ExecutionResponse, got : {req:?}")
             }
+            req @ WorkerClientApiCalls::GoingAway(_) => {
+                panic!("expect_execution_response expected ExecutionResponse, got : {req:?}")
+            }
         };
         self.tx_resp
             .send(WorkerClientApiReturns::ExecutionResponse(result))
+            .expect("Could not send request to mpsc");
+        req
+    }
+
+    pub(crate) async fn expect_going_away(
+        &self,
+        result: Result<(), Error>,
+    ) -> GoingAwayRequest {
+        let mut rx_call_lock = self.rx_call.lock().await;
+        let req = match rx_call_lock
+            .recv()
+            .await
+            .expect("Could not receive msg in mpsc")
+        {
+            WorkerClientApiCalls::GoingAway(req) => req,
+            req @ WorkerClientApiCalls::ConnectWorker(_) => {
+                panic!("expect_going_away expected GoingAway, got : {req:?}")
+            }
+            req @ WorkerClientApiCalls::ExecutionResponse(_) => {
+                panic!("expect_going_away expected GoingAway, got : {req:?}")
+            }
+        };
+        self.tx_resp
+            .send(WorkerClientApiReturns::GoingAway(result))
             .expect("Could not send request to mpsc");
         req
     }
@@ -154,7 +186,10 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
             WorkerClientApiReturns::ConnectWorker(result) => result,
             resp @ WorkerClientApiReturns::ExecutionResponse(_) => {
                 panic!("connect_worker expected ConnectWorker response, received {resp:?}")
-            }
+            },
+            resp @ WorkerClientApiReturns::GoingAway(_) => {
+                panic!("connect_worker expected ConnectWorker response, received {resp:?}")
+            },
         }
     }
 
@@ -162,8 +197,24 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
         unreachable!();
     }
 
-    async fn going_away(&mut self, _request: GoingAwayRequest) -> Result<(), Error> {
-        unreachable!();
+    async fn going_away(&mut self, request: GoingAwayRequest) -> Result<(), Error> {
+        self.tx_call
+            .send(WorkerClientApiCalls::GoingAway(request))
+            .expect("Could not send request to mpsc");
+        let mut rx_resp_lock = self.rx_resp.lock().await;
+        match rx_resp_lock
+            .recv()
+            .await
+            .expect("Could not receive msg in mpsc")
+        {
+            WorkerClientApiReturns::GoingAway(result) => result,
+            resp @ WorkerClientApiReturns::ConnectWorker(_) => {
+                panic!("going_away expected GoingAway response, received {resp:?}")
+            }
+            resp @ WorkerClientApiReturns::ExecutionResponse(_) => {
+                panic!("going_away expected GoingAway response, received {resp:?}")
+            }
+        }
     }
 
     async fn execution_response(&mut self, request: ExecuteResult) -> Result<(), Error> {
@@ -178,6 +229,9 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
         {
             WorkerClientApiReturns::ExecutionResponse(result) => result,
             resp @ WorkerClientApiReturns::ConnectWorker(_) => {
+                panic!("execution_response expected ExecutionResponse response, received {resp:?}")
+            }
+            resp @ WorkerClientApiReturns::GoingAway(_) => {
                 panic!("execution_response expected ExecutionResponse response, received {resp:?}")
             }
         }
@@ -217,7 +271,7 @@ pub(crate) async fn setup_local_worker_with_config(
     let (shutdown_tx_test, _) = broadcast::channel::<ShutdownGuard>(BROADCAST_CAPACITY);
 
     let drop_guard = spawn!("local_worker_spawn", async move {
-        worker.run(shutdown_tx_test.subscribe()).await
+        worker.run(shutdown_tx_test.clone(), shutdown_tx_test.subscribe()).await
     });
 
     let (tx_stream, streaming_response) = setup_grpc_stream();

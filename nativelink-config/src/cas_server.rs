@@ -803,6 +803,17 @@ pub struct LocalWorkerConfig {
     /// them from CAS for every action.
     /// Default: None (directory cache disabled)
     pub directory_cache: Option<DirectoryCacheConfig>,
+
+    #[serde(default)]
+    pub execution_completion_behaviour: ExecutionCompletionBehaviour,
+}
+
+#[derive(Deserialize, Serialize, Debug, Default, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCompletionBehaviour {
+    #[default]
+    Default,
+    OneShotAlways,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
