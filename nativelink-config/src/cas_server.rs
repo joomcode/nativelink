@@ -1629,6 +1629,21 @@ pub struct LocalWorkerConfig {
     /// Default: True when `use_mount_namespace` is true and `/tmp` exists,
     /// otherwise False.
     pub isolate_tmp: Option<bool>,
+
+    /// Fork compatibility alias: `one_shot_always` sets `single_use`.
+    ///
+    /// Default: default
+    #[serde(default)]
+    pub execution_completion_behaviour: ExecutionCompletionBehaviour,
+}
+
+#[derive(Deserialize, Serialize, Debug, Default, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "dev-schema", derive(JsonSchema))]
+pub enum ExecutionCompletionBehaviour {
+    #[default]
+    Default,
+    OneShotAlways,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -1817,6 +1832,14 @@ impl CasConfig {
         for server in &config.servers {
             if let Some(services) = &server.services {
                 Self::check_store_conflict(services)?;
+            }
+        }
+        for WorkerConfig::Local(worker) in config.workers.iter_mut().flatten() {
+            if matches!(
+                worker.execution_completion_behaviour,
+                ExecutionCompletionBehaviour::OneShotAlways
+            ) {
+                worker.single_use = true;
             }
         }
         config.validate_single_use_worker()?;
@@ -2041,6 +2064,27 @@ mod tests {
         config.validate_single_use_worker().unwrap();
         config.servers[0].services.as_mut().unwrap().cas = Some(vec![]);
         assert!(config.validate_single_use_worker().is_err());
+    }
+
+    #[test]
+    fn one_shot_always_sets_single_use() {
+        let config = CasConfig::try_from_json5_str(
+            r#"{
+            stores: [],
+            servers: [],
+            workers: [{ local: {
+                worker_api_endpoint: { uri: "grpc://127.0.0.1:50061" },
+                cas_fast_slow_store: "WORKER_FAST_SLOW_STORE",
+                upload_action_result: {},
+                work_directory: "/tmp/nativelink/work",
+                platform_properties: {},
+                execution_completion_behaviour: "one_shot_always",
+            } }],
+        }"#,
+        )
+        .unwrap();
+        let WorkerConfig::Local(worker) = &config.workers.unwrap()[0];
+        assert!(worker.single_use);
     }
 
     #[test]
