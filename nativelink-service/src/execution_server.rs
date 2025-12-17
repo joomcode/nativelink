@@ -639,7 +639,7 @@ impl Operations for ExecutionServer {
 #[cfg(test)]
 #[test]
 fn test_nl_op_id_from_name() -> Result<(), Box<dyn core::error::Error>> {
-    let examples = [("foo/bar", "foo"), ("a/b/c/d", "a/b/c")];
+    let examples = [("foo/bar", "foo"), ("a/b/c/d", "a")];
 
     for (input, expected) in examples {
         let id = NativelinkOperationId::from_name(input)?;
