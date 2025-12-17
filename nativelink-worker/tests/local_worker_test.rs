@@ -16,7 +16,7 @@ use core::time::Duration;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Write};
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ mod utils {
 }
 
 use hyper::body::Frame;
-use nativelink_config::cas_server::{LocalWorkerConfig, WorkerProperty};
+use nativelink_config::cas_server::{ExecutionCompletionBehaviour, LocalWorkerConfig, WorkerProperty};
 use nativelink_config::stores::{
     FastSlowSpec, FilesystemSpec, MemorySpec, StoreDirection, StoreSpec,
 };
@@ -418,6 +418,125 @@ async fn simple_worker_start_action_test() -> Result<(), Error> {
             )),
         }
     );
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn one_shot_shutdowns_worker_test() -> Result<(), Error> {
+    let config = LocalWorkerConfig {
+        execution_completion_behaviour: ExecutionCompletionBehaviour::OneShotAlways,
+        ..Default::default()
+    };
+    let mut test_context = setup_local_worker_with_config(config).await;
+    let streaming_response = test_context.maybe_streaming_response.take().unwrap();
+
+    {
+        let props = test_context
+            .client
+            .expect_connect_worker(Ok(streaming_response))
+            .await;
+        assert_eq!(props, ConnectWorkerRequest::default());
+    }
+
+    let expected_worker_id = "foobar".to_string();
+
+    let tx_stream = test_context.maybe_tx_stream.take().unwrap();
+    {
+        // First initialize our worker by sending the response to the connection request.
+        tx_stream
+            .send(Frame::data(
+                encode_stream_proto(&UpdateForWorker {
+                    update: Some(Update::ConnectionResult(ConnectionResult {
+                        worker_id: expected_worker_id.clone(),
+                    })),
+                })
+                    .unwrap(),
+            ))
+            .await
+            .map_err(|e| make_input_err!("Could not send : {:?}", e))?;
+    }
+
+    let action_digest = DigestInfo::new([3u8; 32], 10);
+    let action_info = ActionInfo {
+        command_digest: DigestInfo::new([1u8; 32], 10),
+        input_root_digest: DigestInfo::new([2u8; 32], 10),
+        timeout: Duration::from_secs(1),
+        platform_properties: HashMap::new(),
+        priority: 0,
+        load_timestamp: SystemTime::UNIX_EPOCH,
+        insert_timestamp: SystemTime::UNIX_EPOCH,
+        unique_qualifier: ActionUniqueQualifier::Uncacheable(ActionUniqueKey {
+            instance_name: INSTANCE_NAME.to_string(),
+            digest_function: DigestHasherFunc::Sha256,
+            digest: action_digest,
+        }),
+    };
+
+    {
+        // Send execution request.
+        tx_stream
+            .send(Frame::data(
+                encode_stream_proto(&UpdateForWorker {
+                    update: Some(Update::StartAction(StartExecute {
+                        execute_request: Some((&action_info).into()),
+                        operation_id: String::new(),
+                        queued_timestamp: None,
+                        platform: Some(Platform::default()),
+                        worker_id: expected_worker_id.clone(),
+                    })),
+                })
+                    .unwrap(),
+            ))
+            .await
+            .map_err(|e| make_input_err!("Could not send : {:?}", e))?;
+    }
+
+    let running_action = Arc::new(MockRunningAction::new());
+
+    let action_result = ActionResult {
+        output_files: vec![],
+        output_folders: vec![],
+        output_file_symlinks: vec![],
+        output_directory_symlinks: vec![],
+        exit_code: 5,
+        stdout_digest: DigestInfo::new([21u8; 32], 10),
+        stderr_digest: DigestInfo::new([22u8; 32], 10),
+        execution_metadata: ExecutionMetadata {
+            worker: expected_worker_id.clone(),
+            queued_timestamp: SystemTime::UNIX_EPOCH,
+            worker_start_timestamp: SystemTime::UNIX_EPOCH,
+            worker_completed_timestamp: SystemTime::UNIX_EPOCH,
+            input_fetch_start_timestamp: SystemTime::UNIX_EPOCH,
+            input_fetch_completed_timestamp: SystemTime::UNIX_EPOCH,
+            execution_start_timestamp: SystemTime::UNIX_EPOCH,
+            execution_completed_timestamp: SystemTime::UNIX_EPOCH,
+            output_upload_start_timestamp: SystemTime::UNIX_EPOCH,
+            output_upload_completed_timestamp: SystemTime::UNIX_EPOCH,
+        },
+        server_logs: HashMap::new(),
+        error: None,
+        message: String::new(),
+    };
+
+    // Send and wait for response from create_and_add_action to RunningActionsManager.
+    test_context
+        .actions_manager
+        .expect_create_and_add_action(Ok(running_action.clone()))
+        .await;
+
+
+    // Now the RunningAction needs to send a series of state updates. This shortcuts them
+    // into a single call (shortcut for prepare, execute, upload, collect_results, cleanup).
+    running_action
+        .simple_expect_get_finished_result(Ok(action_result.clone()))
+        .await?;
+
+    test_context.client.expect_execution_response(Ok(())).await;
+
+    test_context.client
+        .expect_going_away(Ok(()))
+        .await;
 
     Ok(())
 }
