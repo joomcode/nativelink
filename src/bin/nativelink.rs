@@ -720,9 +720,23 @@ async fn inner_main(
                     }
                     worker_names.insert(name.clone());
                     let shutdown_rx = shutdown_tx.subscribe();
+                    let worker_name = name.clone();
                     let fut = trace_span!("worker_ctx", worker_name = %name)
-                        .in_scope(|| local_worker.run(shutdown_rx));
-                    spawn!("worker", fut, ?name)
+                        .in_scope(|| local_worker.run(shutdown_tx.clone(), shutdown_rx));
+                    spawn!(
+                        "worker",
+                        async move {
+                            let result = fut.await;
+                            if result.is_ok() {
+                                // Worker completed successfully (graceful shutdown).
+                                // Exit the process with code 0.
+                                info!(worker_name = %worker_name, "Worker completed successfully, exiting process");
+                                std::process::exit(0);
+                            }
+                            result
+                        },
+                        ?name
+                    )
                 }
             };
             root_futures.push(Box::pin(spawn_fut.map_ok_or_else(|e| Err(e.into()), |v| v)));
