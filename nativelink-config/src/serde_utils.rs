@@ -18,7 +18,7 @@ use std::fmt;
 
 use byte_unit::Byte;
 use humantime::parse_duration;
-use serde::de::Visitor;
+use serde::de::{DeserializeOwned, Visitor};
 use serde::{Deserialize, Deserializer, de};
 
 /// Helper for serde macro so you can use shellexpand variables in the json configuration
@@ -361,4 +361,18 @@ where
     }
 
     deserializer.deserialize_any(DurationVisitor::<T>(PhantomData))
+}
+
+pub fn convert_enum_with_shellexpand<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let s = String::deserialize(deserializer)?;
+    let expanded = shellexpand::env(&s)
+        .map_err(de::Error::custom)?;
+
+    let quoted = format!("\"{}\"", expanded);
+    serde_json5::from_str(&quoted)
+        .map_err(de::Error::custom)
 }
