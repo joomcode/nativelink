@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::schedulers::SchedulerSpec;
 use crate::serde_utils::{
     convert_data_size_with_shellexpand, convert_duration_with_shellexpand,
-    convert_numeric_with_shellexpand, convert_optional_numeric_with_shellexpand,
-    convert_optional_string_with_shellexpand, convert_string_with_shellexpand,
-    convert_vec_string_with_shellexpand,
+    convert_enum_with_shellexpand, convert_numeric_with_shellexpand,
+    convert_optional_numeric_with_shellexpand, convert_optional_string_with_shellexpand,
+    convert_string_with_shellexpand, convert_vec_string_with_shellexpand,
 };
 use crate::stores::{ClientTlsConfig, ConfigDigestHashFunction, StoreRefName, StoreSpec};
 
@@ -880,7 +880,7 @@ pub struct LocalWorkerConfig {
     /// Default: False.
     pub use_mount_namespace: Option<bool>,
 
-    #[serde(default)]
+    #[serde(deserialize_with = "convert_enum_with_shellexpand")]
     pub execution_completion_behaviour: ExecutionCompletionBehaviour,
 }
 
