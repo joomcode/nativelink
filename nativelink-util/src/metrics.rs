@@ -55,10 +55,33 @@ pub fn register_queued_actions_callback(callback: QueuedActionsCallback) {
     );
 }
 
+/// Callback type for the `running_actions_directory_cache_stat` observable
+/// gauge. The callback receives a reporter function to record each named
+/// stat (see `DirectoryCache::metric_snapshot`) with its current value.
+pub type DirectoryCacheStatsCallback = Box<dyn Fn(&dyn Fn(&str, u64)) + Send + Sync>;
+
+/// Storage for the external callback for directory cache statistics.
+static DIRECTORY_CACHE_STATS_CALLBACK: OnceLock<DirectoryCacheStatsCallback> = OnceLock::new();
+
+/// Registers an external callback for the `running_actions_directory_cache_stat`
+/// observable gauge.
+///
+/// Unlike `register_queued_actions_callback`, repeated registrations are
+/// silently ignored (only the first caller's directory cache is observed)
+/// rather than panicking, because tests routinely construct many
+/// `RunningActionsManagerImpl` instances within the same process.
+pub fn register_directory_cache_stats_callback(callback: DirectoryCacheStatsCallback) {
+    drop(DIRECTORY_CACHE_STATS_CALLBACK.set(callback));
+}
+
 // Metric attribute keys for cache operations.
 pub const CACHE_TYPE: &str = "cache.type";
 pub const CACHE_OPERATION: &str = "cache.operation.name";
 pub const CACHE_RESULT: &str = "cache.operation.result";
+
+/// Metric attribute key for the directory cache statistic name reported by
+/// the `running_actions_directory_cache_stat` observable gauge.
+pub const DIRECTORY_CACHE_STAT: &str = "directory_cache.stat";
 
 // Metric attribute keys for remote execution operations.
 pub const EXECUTION_STAGE: &str = "execution_stage";
@@ -803,7 +826,7 @@ impl From<WorkerState> for Value {
 
 /// Pre-allocated attribute combinations for efficient worker metrics collection.
 #[derive(Debug)]
-pub struct WorkerMetricAttrs {
+pub struct WorkerPoolMetricAttrs {
     added: Vec<KeyValue>,
     removed: Vec<KeyValue>,
     timeout: Vec<KeyValue>,
@@ -814,7 +837,7 @@ pub struct WorkerMetricAttrs {
     state_draining: Vec<KeyValue>,
 }
 
-impl WorkerMetricAttrs {
+impl WorkerPoolMetricAttrs {
     #[must_use]
     pub fn new(base_attrs: &[KeyValue]) -> Self {
         let make_event_attrs = |event: WorkerEventType| {
@@ -876,7 +899,7 @@ impl WorkerMetricAttrs {
 }
 
 /// Global worker pool metrics instruments.
-pub static WORKER_METRICS: LazyLock<WorkerPoolMetrics> = LazyLock::new(|| {
+pub static WORKER_POOL_METRICS: LazyLock<WorkerPoolMetrics> = LazyLock::new(|| {
     let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
 
     WorkerPoolMetrics {
@@ -933,4 +956,651 @@ pub struct WorkerPoolMetrics {
     pub worker_actions_completed: metrics::Counter<u64>,
     /// Counter of action dispatch failures
     pub worker_dispatch_failures: metrics::Counter<u64>,
+}
+
+// Metric attribute keys for local worker operations.
+pub const WORKER_NAME: &str = "worker.name";
+pub const WORKER_OPERATION: &str = "worker.operation";
+pub const WORKER_RESULT: &str = "worker.result";
+
+/// Global local worker metrics instruments.
+pub static LOCAL_WORKER_METRICS: LazyLock<LocalWorkerMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    LocalWorkerMetrics {
+        start_actions_received: meter
+            .u64_counter("worker_start_actions_received")
+            .with_description("Total number of actions sent to this worker to process")
+            .with_unit("{action}")
+            .build(),
+
+        disconnects_received: meter
+            .u64_counter("worker_disconnects_received")
+            .with_description("Total number of disconnects received from the scheduler")
+            .with_unit("{disconnect}")
+            .build(),
+
+        keep_alives_received: meter
+            .u64_counter("worker_keep_alives_received")
+            .with_description("Total number of keep-alives received from the scheduler")
+            .with_unit("{keepalive}")
+            .build(),
+
+        preconditions_calls: meter
+            .u64_counter("worker_preconditions_calls")
+            .with_description("Total number of precondition check calls")
+            .with_unit("{call}")
+            .build(),
+
+        preconditions_successes: meter
+            .u64_counter("worker_preconditions_successes")
+            .with_description("Total number of successful precondition checks")
+            .with_unit("{success}")
+            .build(),
+
+        preconditions_failures: meter
+            .u64_counter("worker_preconditions_failures")
+            .with_description("Total number of failed precondition checks")
+            .with_unit("{failure}")
+            .build(),
+
+        preconditions_duration: meter
+            .f64_histogram("worker_preconditions_duration")
+            .with_description("Duration of precondition checks in milliseconds")
+            .with_unit("ms")
+            .with_boundaries(vec![
+                0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0,
+                5000.0,
+            ])
+            .build(),
+    }
+});
+
+/// OpenTelemetry metrics instruments for local worker monitoring.
+#[derive(Debug)]
+pub struct LocalWorkerMetrics {
+    /// Counter for actions received by the worker
+    pub start_actions_received: metrics::Counter<u64>,
+    /// Counter for disconnects received from scheduler
+    pub disconnects_received: metrics::Counter<u64>,
+    /// Counter for keep-alives received from scheduler
+    pub keep_alives_received: metrics::Counter<u64>,
+    /// Counter for precondition check calls
+    pub preconditions_calls: metrics::Counter<u64>,
+    /// Counter for successful precondition checks
+    pub preconditions_successes: metrics::Counter<u64>,
+    /// Counter for failed precondition checks
+    pub preconditions_failures: metrics::Counter<u64>,
+    /// Histogram for precondition check durations
+    pub preconditions_duration: metrics::Histogram<f64>,
+}
+
+/// Pre-allocated attribute combinations for efficient worker metrics collection.
+#[derive(Debug)]
+pub struct WorkerMetricAttrs {
+    base: Vec<KeyValue>,
+}
+
+impl WorkerMetricAttrs {
+    /// Creates a new set of pre-computed attributes with the worker name.
+    #[must_use]
+    pub fn new(worker_name: &str) -> Self {
+        Self {
+            base: vec![KeyValue::new(WORKER_NAME, worker_name.to_string())],
+        }
+    }
+
+    #[must_use]
+    pub fn base(&self) -> &[KeyValue] {
+        &self.base
+    }
+}
+
+// Metric attribute keys for running actions operations.
+pub const RUNNING_ACTION_OPERATION: &str = "running_action.operation";
+pub const RUNNING_ACTION_RESULT: &str = "running_action.result";
+
+/// Global running actions metrics instruments.
+pub static RUNNING_ACTIONS_METRICS: LazyLock<RunningActionsMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    // Helper to create standard histogram boundaries for operation durations
+    let duration_boundaries = vec![
+        0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0,
+        10000.0, 30000.0, 60000.0,
+    ];
+
+    RunningActionsMetrics {
+        // Async operation counters
+        create_and_add_action_calls: meter
+            .u64_counter("running_actions_create_and_add_action_calls")
+            .with_description("Total calls to create_and_add_action")
+            .with_unit("{call}")
+            .build(),
+        create_and_add_action_successes: meter
+            .u64_counter("running_actions_create_and_add_action_successes")
+            .with_description("Successful create_and_add_action operations")
+            .with_unit("{success}")
+            .build(),
+        create_and_add_action_failures: meter
+            .u64_counter("running_actions_create_and_add_action_failures")
+            .with_description("Failed create_and_add_action operations")
+            .with_unit("{failure}")
+            .build(),
+        create_and_add_action_duration: meter
+            .f64_histogram("running_actions_create_and_add_action_duration")
+            .with_description("Duration of create_and_add_action operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        cache_action_result_calls: meter
+            .u64_counter("running_actions_cache_action_result_calls")
+            .with_description("Total calls to cache_action_result")
+            .with_unit("{call}")
+            .build(),
+        cache_action_result_successes: meter
+            .u64_counter("running_actions_cache_action_result_successes")
+            .with_description("Successful cache_action_result operations")
+            .with_unit("{success}")
+            .build(),
+        cache_action_result_failures: meter
+            .u64_counter("running_actions_cache_action_result_failures")
+            .with_description("Failed cache_action_result operations")
+            .with_unit("{failure}")
+            .build(),
+        cache_action_result_duration: meter
+            .f64_histogram("running_actions_cache_action_result_duration")
+            .with_description("Duration of cache_action_result operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        kill_all_calls: meter
+            .u64_counter("running_actions_kill_all_calls")
+            .with_description("Total calls to kill_all")
+            .with_unit("{call}")
+            .build(),
+        kill_all_duration: meter
+            .f64_histogram("running_actions_kill_all_duration")
+            .with_description("Duration of kill_all operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        create_action_info_calls: meter
+            .u64_counter("running_actions_create_action_info_calls")
+            .with_description("Total calls to create_action_info")
+            .with_unit("{call}")
+            .build(),
+        create_action_info_successes: meter
+            .u64_counter("running_actions_create_action_info_successes")
+            .with_description("Successful create_action_info operations")
+            .with_unit("{success}")
+            .build(),
+        create_action_info_failures: meter
+            .u64_counter("running_actions_create_action_info_failures")
+            .with_description("Failed create_action_info operations")
+            .with_unit("{failure}")
+            .build(),
+        create_action_info_duration: meter
+            .f64_histogram("running_actions_create_action_info_duration")
+            .with_description("Duration of create_action_info operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        make_action_directory_calls: meter
+            .u64_counter("running_actions_make_action_directory_calls")
+            .with_description("Total calls to make_action_directory")
+            .with_unit("{call}")
+            .build(),
+        make_action_directory_successes: meter
+            .u64_counter("running_actions_make_action_directory_successes")
+            .with_description("Successful make_action_directory operations")
+            .with_unit("{success}")
+            .build(),
+        make_action_directory_failures: meter
+            .u64_counter("running_actions_make_action_directory_failures")
+            .with_description("Failed make_action_directory operations")
+            .with_unit("{failure}")
+            .build(),
+        make_action_directory_duration: meter
+            .f64_histogram("running_actions_make_action_directory_duration")
+            .with_description("Duration of make_action_directory operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        prepare_action_calls: meter
+            .u64_counter("running_actions_prepare_action_calls")
+            .with_description("Total calls to prepare_action")
+            .with_unit("{call}")
+            .build(),
+        prepare_action_successes: meter
+            .u64_counter("running_actions_prepare_action_successes")
+            .with_description("Successful prepare_action operations")
+            .with_unit("{success}")
+            .build(),
+        prepare_action_failures: meter
+            .u64_counter("running_actions_prepare_action_failures")
+            .with_description("Failed prepare_action operations")
+            .with_unit("{failure}")
+            .build(),
+        prepare_action_duration: meter
+            .f64_histogram("running_actions_prepare_action_duration")
+            .with_description("Duration of prepare_action operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        execute_calls: meter
+            .u64_counter("running_actions_execute_calls")
+            .with_description("Total calls to execute")
+            .with_unit("{call}")
+            .build(),
+        execute_successes: meter
+            .u64_counter("running_actions_execute_successes")
+            .with_description("Successful execute operations")
+            .with_unit("{success}")
+            .build(),
+        execute_failures: meter
+            .u64_counter("running_actions_execute_failures")
+            .with_description("Failed execute operations")
+            .with_unit("{failure}")
+            .build(),
+        execute_duration: meter
+            .f64_histogram("running_actions_execute_duration")
+            .with_description("Duration of execute operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        upload_results_calls: meter
+            .u64_counter("running_actions_upload_results_calls")
+            .with_description("Total calls to upload_results")
+            .with_unit("{call}")
+            .build(),
+        upload_results_successes: meter
+            .u64_counter("running_actions_upload_results_successes")
+            .with_description("Successful upload_results operations")
+            .with_unit("{success}")
+            .build(),
+        upload_results_failures: meter
+            .u64_counter("running_actions_upload_results_failures")
+            .with_description("Failed upload_results operations")
+            .with_unit("{failure}")
+            .build(),
+        upload_results_duration: meter
+            .f64_histogram("running_actions_upload_results_duration")
+            .with_description("Duration of upload_results operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        cleanup_calls: meter
+            .u64_counter("running_actions_cleanup_calls")
+            .with_description("Total calls to cleanup")
+            .with_unit("{call}")
+            .build(),
+        cleanup_successes: meter
+            .u64_counter("running_actions_cleanup_successes")
+            .with_description("Successful cleanup operations")
+            .with_unit("{success}")
+            .build(),
+        cleanup_failures: meter
+            .u64_counter("running_actions_cleanup_failures")
+            .with_description("Failed cleanup operations")
+            .with_unit("{failure}")
+            .build(),
+        cleanup_duration: meter
+            .f64_histogram("running_actions_cleanup_duration")
+            .with_description("Duration of cleanup operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        get_finished_result_calls: meter
+            .u64_counter("running_actions_get_finished_result_calls")
+            .with_description("Total calls to get_finished_result")
+            .with_unit("{call}")
+            .build(),
+        get_finished_result_successes: meter
+            .u64_counter("running_actions_get_finished_result_successes")
+            .with_description("Successful get_finished_result operations")
+            .with_unit("{success}")
+            .build(),
+        get_finished_result_failures: meter
+            .u64_counter("running_actions_get_finished_result_failures")
+            .with_description("Failed get_finished_result operations")
+            .with_unit("{failure}")
+            .build(),
+        get_finished_result_duration: meter
+            .f64_histogram("running_actions_get_finished_result_duration")
+            .with_description("Duration of get_finished_result operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        // Simple counters
+        cleanup_waits: meter
+            .u64_counter("running_actions_cleanup_waits")
+            .with_description("Number of times an action waited for cleanup to complete")
+            .with_unit("{wait}")
+            .build(),
+
+        stale_removals: meter
+            .u64_counter("running_actions_stale_removals")
+            .with_description("Number of stale directories removed during action retries")
+            .with_unit("{removal}")
+            .build(),
+
+        cleanup_wait_timeouts: meter
+            .u64_counter("running_actions_cleanup_wait_timeouts")
+            .with_description("Number of timeouts while waiting for cleanup to complete")
+            .with_unit("{timeout}")
+            .build(),
+
+        // Additional async operation metrics
+        get_proto_command_from_store_calls: meter
+            .u64_counter("running_actions_get_proto_command_from_store_calls")
+            .with_description("Total calls to get_proto_command_from_store")
+            .with_unit("{call}")
+            .build(),
+        get_proto_command_from_store_successes: meter
+            .u64_counter("running_actions_get_proto_command_from_store_successes")
+            .with_description("Successful get_proto_command_from_store operations")
+            .with_unit("{success}")
+            .build(),
+        get_proto_command_from_store_failures: meter
+            .u64_counter("running_actions_get_proto_command_from_store_failures")
+            .with_description("Failed get_proto_command_from_store operations")
+            .with_unit("{failure}")
+            .build(),
+        get_proto_command_from_store_duration: meter
+            .f64_histogram("running_actions_get_proto_command_from_store_duration")
+            .with_description("Duration of get_proto_command_from_store operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        download_to_directory_calls: meter
+            .u64_counter("running_actions_download_to_directory_calls")
+            .with_description("Total calls to download_to_directory")
+            .with_unit("{call}")
+            .build(),
+        download_to_directory_successes: meter
+            .u64_counter("running_actions_download_to_directory_successes")
+            .with_description("Successful download_to_directory operations")
+            .with_unit("{success}")
+            .build(),
+        download_to_directory_failures: meter
+            .u64_counter("running_actions_download_to_directory_failures")
+            .with_description("Failed download_to_directory operations")
+            .with_unit("{failure}")
+            .build(),
+        download_to_directory_duration: meter
+            .f64_histogram("running_actions_download_to_directory_duration")
+            .with_description("Duration of download_to_directory operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        prepare_output_files_calls: meter
+            .u64_counter("running_actions_prepare_output_files_calls")
+            .with_description("Total calls to prepare_output_files")
+            .with_unit("{call}")
+            .build(),
+        prepare_output_files_successes: meter
+            .u64_counter("running_actions_prepare_output_files_successes")
+            .with_description("Successful prepare_output_files operations")
+            .with_unit("{success}")
+            .build(),
+        prepare_output_files_failures: meter
+            .u64_counter("running_actions_prepare_output_files_failures")
+            .with_description("Failed prepare_output_files operations")
+            .with_unit("{failure}")
+            .build(),
+        prepare_output_files_duration: meter
+            .f64_histogram("running_actions_prepare_output_files_duration")
+            .with_description("Duration of prepare_output_files operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        prepare_output_paths_calls: meter
+            .u64_counter("running_actions_prepare_output_paths_calls")
+            .with_description("Total calls to prepare_output_paths")
+            .with_unit("{call}")
+            .build(),
+        prepare_output_paths_successes: meter
+            .u64_counter("running_actions_prepare_output_paths_successes")
+            .with_description("Successful prepare_output_paths operations")
+            .with_unit("{success}")
+            .build(),
+        prepare_output_paths_failures: meter
+            .u64_counter("running_actions_prepare_output_paths_failures")
+            .with_description("Failed prepare_output_paths operations")
+            .with_unit("{failure}")
+            .build(),
+        prepare_output_paths_duration: meter
+            .f64_histogram("running_actions_prepare_output_paths_duration")
+            .with_description("Duration of prepare_output_paths operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        child_process_calls: meter
+            .u64_counter("running_actions_child_process_calls")
+            .with_description("Total calls to child_process")
+            .with_unit("{call}")
+            .build(),
+        child_process_successes: meter
+            .u64_counter("running_actions_child_process_successes")
+            .with_description("Successful child_process operations")
+            .with_unit("{success}")
+            .build(),
+        child_process_duration: meter
+            .f64_histogram("running_actions_child_process_duration")
+            .with_description("Duration of child_process operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        child_process_success_error_code: meter
+            .u64_counter("running_actions_child_process_success_exit_code")
+            .with_description("Number of child processes with success exit code (0)")
+            .with_unit("{process}")
+            .build(),
+
+        child_process_failure_error_code: meter
+            .u64_counter("running_actions_child_process_failure_exit_code")
+            .with_description("Number of child processes with non-zero exit code")
+            .with_unit("{process}")
+            .build(),
+
+        upload_stdout_calls: meter
+            .u64_counter("running_actions_upload_stdout_calls")
+            .with_description("Total calls to upload_stdout")
+            .with_unit("{call}")
+            .build(),
+        upload_stdout_successes: meter
+            .u64_counter("running_actions_upload_stdout_successes")
+            .with_description("Successful upload_stdout operations")
+            .with_unit("{success}")
+            .build(),
+        upload_stdout_failures: meter
+            .u64_counter("running_actions_upload_stdout_failures")
+            .with_description("Failed upload_stdout operations")
+            .with_unit("{failure}")
+            .build(),
+        upload_stdout_duration: meter
+            .f64_histogram("running_actions_upload_stdout_duration")
+            .with_description("Duration of upload_stdout operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        upload_stderr_calls: meter
+            .u64_counter("running_actions_upload_stderr_calls")
+            .with_description("Total calls to upload_stderr")
+            .with_unit("{call}")
+            .build(),
+        upload_stderr_successes: meter
+            .u64_counter("running_actions_upload_stderr_successes")
+            .with_description("Successful upload_stderr operations")
+            .with_unit("{success}")
+            .build(),
+        upload_stderr_failures: meter
+            .u64_counter("running_actions_upload_stderr_failures")
+            .with_description("Failed upload_stderr operations")
+            .with_unit("{failure}")
+            .build(),
+        upload_stderr_duration: meter
+            .f64_histogram("running_actions_upload_stderr_duration")
+            .with_description("Duration of upload_stderr operations")
+            .with_unit("ms")
+            .with_boundaries(duration_boundaries.clone())
+            .build(),
+
+        task_timeouts: meter
+            .u64_counter("running_actions_task_timeouts")
+            .with_description("Total number of task timeouts")
+            .with_unit("{timeout}")
+            .build(),
+
+        directory_cache_stat: meter
+            .u64_observable_gauge("running_actions_directory_cache_stat")
+            .with_description(
+                "Directory cache statistics (hits, misses, subtree reuse, evictions, size), \
+                 distinguished by the `directory_cache.stat` attribute",
+            )
+            .with_callback(|observer| {
+                if let Some(callback) = DIRECTORY_CACHE_STATS_CALLBACK.get() {
+                    callback(&|name, value| {
+                        observer.observe(
+                            value,
+                            &[KeyValue::new(DIRECTORY_CACHE_STAT, name.to_string())],
+                        );
+                    });
+                }
+            })
+            .build(),
+    }
+});
+
+/// OpenTelemetry metrics instruments for running actions monitoring.
+#[derive(Debug)]
+pub struct RunningActionsMetrics {
+    // create_and_add_action metrics
+    pub create_and_add_action_calls: metrics::Counter<u64>,
+    pub create_and_add_action_successes: metrics::Counter<u64>,
+    pub create_and_add_action_failures: metrics::Counter<u64>,
+    pub create_and_add_action_duration: metrics::Histogram<f64>,
+
+    // cache_action_result metrics
+    pub cache_action_result_calls: metrics::Counter<u64>,
+    pub cache_action_result_successes: metrics::Counter<u64>,
+    pub cache_action_result_failures: metrics::Counter<u64>,
+    pub cache_action_result_duration: metrics::Histogram<f64>,
+
+    // kill_all metrics
+    pub kill_all_calls: metrics::Counter<u64>,
+    pub kill_all_duration: metrics::Histogram<f64>,
+
+    // create_action_info metrics
+    pub create_action_info_calls: metrics::Counter<u64>,
+    pub create_action_info_successes: metrics::Counter<u64>,
+    pub create_action_info_failures: metrics::Counter<u64>,
+    pub create_action_info_duration: metrics::Histogram<f64>,
+
+    // make_action_directory metrics
+    pub make_action_directory_calls: metrics::Counter<u64>,
+    pub make_action_directory_successes: metrics::Counter<u64>,
+    pub make_action_directory_failures: metrics::Counter<u64>,
+    pub make_action_directory_duration: metrics::Histogram<f64>,
+
+    // prepare_action metrics
+    pub prepare_action_calls: metrics::Counter<u64>,
+    pub prepare_action_successes: metrics::Counter<u64>,
+    pub prepare_action_failures: metrics::Counter<u64>,
+    pub prepare_action_duration: metrics::Histogram<f64>,
+
+    // execute metrics
+    pub execute_calls: metrics::Counter<u64>,
+    pub execute_successes: metrics::Counter<u64>,
+    pub execute_failures: metrics::Counter<u64>,
+    pub execute_duration: metrics::Histogram<f64>,
+
+    // upload_results metrics
+    pub upload_results_calls: metrics::Counter<u64>,
+    pub upload_results_successes: metrics::Counter<u64>,
+    pub upload_results_failures: metrics::Counter<u64>,
+    pub upload_results_duration: metrics::Histogram<f64>,
+
+    // cleanup metrics
+    pub cleanup_calls: metrics::Counter<u64>,
+    pub cleanup_successes: metrics::Counter<u64>,
+    pub cleanup_failures: metrics::Counter<u64>,
+    pub cleanup_duration: metrics::Histogram<f64>,
+
+    // get_finished_result metrics
+    pub get_finished_result_calls: metrics::Counter<u64>,
+    pub get_finished_result_successes: metrics::Counter<u64>,
+    pub get_finished_result_failures: metrics::Counter<u64>,
+    pub get_finished_result_duration: metrics::Histogram<f64>,
+
+    // Simple counters
+    pub cleanup_waits: metrics::Counter<u64>,
+    pub stale_removals: metrics::Counter<u64>,
+    pub cleanup_wait_timeouts: metrics::Counter<u64>,
+
+    // get_proto_command_from_store metrics
+    pub get_proto_command_from_store_calls: metrics::Counter<u64>,
+    pub get_proto_command_from_store_successes: metrics::Counter<u64>,
+    pub get_proto_command_from_store_failures: metrics::Counter<u64>,
+    pub get_proto_command_from_store_duration: metrics::Histogram<f64>,
+
+    // download_to_directory metrics
+    pub download_to_directory_calls: metrics::Counter<u64>,
+    pub download_to_directory_successes: metrics::Counter<u64>,
+    pub download_to_directory_failures: metrics::Counter<u64>,
+    pub download_to_directory_duration: metrics::Histogram<f64>,
+
+    // prepare_output_files metrics
+    pub prepare_output_files_calls: metrics::Counter<u64>,
+    pub prepare_output_files_successes: metrics::Counter<u64>,
+    pub prepare_output_files_failures: metrics::Counter<u64>,
+    pub prepare_output_files_duration: metrics::Histogram<f64>,
+
+    // prepare_output_paths metrics
+    pub prepare_output_paths_calls: metrics::Counter<u64>,
+    pub prepare_output_paths_successes: metrics::Counter<u64>,
+    pub prepare_output_paths_failures: metrics::Counter<u64>,
+    pub prepare_output_paths_duration: metrics::Histogram<f64>,
+
+    // child_process metrics
+    pub child_process_calls: metrics::Counter<u64>,
+    pub child_process_successes: metrics::Counter<u64>,
+    pub child_process_duration: metrics::Histogram<f64>,
+    pub child_process_success_error_code: metrics::Counter<u64>,
+    pub child_process_failure_error_code: metrics::Counter<u64>,
+
+    // upload_stdout metrics
+    pub upload_stdout_calls: metrics::Counter<u64>,
+    pub upload_stdout_successes: metrics::Counter<u64>,
+    pub upload_stdout_failures: metrics::Counter<u64>,
+    pub upload_stdout_duration: metrics::Histogram<f64>,
+
+    // upload_stderr metrics
+    pub upload_stderr_calls: metrics::Counter<u64>,
+    pub upload_stderr_successes: metrics::Counter<u64>,
+    pub upload_stderr_failures: metrics::Counter<u64>,
+    pub upload_stderr_duration: metrics::Histogram<f64>,
+
+    // Other counters
+    pub task_timeouts: metrics::Counter<u64>,
+
+    // Directory cache metrics (see `DirectoryCacheStatsCallback`)
+    pub directory_cache_stat: metrics::ObservableGauge<u64>,
 }

@@ -30,7 +30,6 @@ use nativelink_config::cas_server::{
     EnvironmentSource, ExecutionCompletionBehaviour, LocalWorkerConfig,
 };
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
-use nativelink_metric::{MetricsComponent, RootMetricsComponent};
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::update_for_worker::Update;
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::worker_api_client::WorkerApiClient;
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::{
@@ -41,13 +40,14 @@ use nativelink_store::fast_slow_store::FastSlowStore;
 use nativelink_util::action_messages::{ActionResult, ActionStage, OperationId};
 use nativelink_util::common::fs;
 use nativelink_util::digest_hasher::DigestHasherFunc;
-use nativelink_util::metrics_utils::{AsyncCounterWrapper, CounterWithTime};
+use nativelink_util::metrics::{LOCAL_WORKER_METRICS, WorkerMetricAttrs};
 use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::Store;
 use nativelink_util::{spawn, tls_utils};
 use opentelemetry::context::Context;
 use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio::{process, time};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::Streaming;
@@ -214,7 +214,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
     async fn run(
         &self,
         update_for_worker_stream: Streaming<UpdateForWorker>,
-        shutdown_rx: &mut broadcast::Receiver<ShutdownGuard>,
+        shutdown_rx: &mut Receiver<ShutdownGuard>,
     ) -> Result<(), Error> {
         // This big block of logic is designed to help simplify upstream components. Upstream
         // components can write standard futures that return a `Result<(), Error>` and this block
@@ -264,10 +264,10 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                         }
                         // TODO(palfrey) We should possibly do something with this notification.
                         Update::Disconnect(()) => {
-                            self.metrics.disconnects_received.inc();
+                            self.metrics.inc_disconnects_received();
                         }
                         Update::KeepAlive(()) => {
-                            self.metrics.keep_alives_received.inc();
+                            self.metrics.inc_keep_alives_received();
                         }
                         Update::KillOperationRequest(kill_operation_request) => {
                             let operation_id = OperationId::from(kill_operation_request.operation_id);
@@ -295,7 +295,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                                 continue;
                             }
 
-                            self.metrics.start_actions_received.inc();
+                            self.metrics.inc_start_actions_received();
 
                             let execute_request = start_execute.execute_request.as_ref();
                             let operation_id = start_execute.operation_id.clone();
@@ -334,7 +334,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                                     operation_id: operation_id.clone(),
                                 };
                                 self.metrics.clone().wrap(move |metrics| async move {
-                                    metrics.preconditions.wrap(preconditions_met(precondition_script_cfg, &extra_envs))
+                                    metrics.wrap_preconditions(preconditions_met(precondition_script_cfg, &extra_envs))
                                     .and_then(|()| running_actions_manager.create_and_add_action(worker_id, start_execute))
                                     .map(move |r| {
                                         // Now that we either failed or registered our action, we can
@@ -789,9 +789,10 @@ impl<T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorker<T,
         connection_factory: ConnectionFactory<T>,
         sleep_fn: Box<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>,
     ) -> Self {
-        let metrics = Arc::new(Metrics::new(Arc::downgrade(
-            running_actions_manager.metrics(),
-        )));
+        let metrics = Arc::new(Metrics::new(
+            &config.name,
+            Arc::downgrade(running_actions_manager.metrics()),
+        ));
         Self {
             config,
             running_actions_manager,
@@ -962,44 +963,76 @@ impl<T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorker<T,
     }
 }
 
-#[derive(Debug, MetricsComponent)]
+/// Instance-based metrics wrapper that provides the `.wrap()` interface
+/// and reports to global OpenTelemetry metrics.
+#[derive(Debug)]
 pub struct Metrics {
-    #[metric(
-        help = "Total number of actions sent to this worker to process. This does not mean it started them, it just means it received a request to execute it."
-    )]
-    start_actions_received: CounterWithTime,
-    #[metric(help = "Total number of disconnects received from the scheduler.")]
-    disconnects_received: CounterWithTime,
-    #[metric(help = "Total number of keep-alives received from the scheduler.")]
-    keep_alives_received: CounterWithTime,
-    #[metric(
-        help = "Stats about the calls to check if an action satisfies the config supplied script."
-    )]
-    preconditions: AsyncCounterWrapper,
-    #[metric]
-    #[allow(
-        clippy::struct_field_names,
-        reason = "TODO Fix this. Triggers on nightly"
-    )]
+    attrs: WorkerMetricAttrs,
+    #[allow(dead_code)]
     running_actions_manager_metrics: Weak<RunningActionManagerMetrics>,
 }
 
-impl RootMetricsComponent for Metrics {}
-
 impl Metrics {
-    fn new(running_actions_manager_metrics: Weak<RunningActionManagerMetrics>) -> Self {
+    fn new(
+        worker_name: &str,
+        running_actions_manager_metrics: Weak<RunningActionManagerMetrics>,
+    ) -> Self {
         Self {
-            start_actions_received: CounterWithTime::default(),
-            disconnects_received: CounterWithTime::default(),
-            keep_alives_received: CounterWithTime::default(),
-            preconditions: AsyncCounterWrapper::default(),
+            attrs: WorkerMetricAttrs::new(worker_name),
             running_actions_manager_metrics,
         }
     }
-}
 
-impl Metrics {
-    async fn wrap<U, T: Future<Output = U>, F: FnOnce(Arc<Self>) -> T>(
+    /// Increment the `start_actions_received` counter
+    pub fn inc_start_actions_received(&self) {
+        LOCAL_WORKER_METRICS
+            .start_actions_received
+            .add(1, self.attrs.base());
+    }
+
+    /// Increment the `disconnects_received` counter
+    pub fn inc_disconnects_received(&self) {
+        LOCAL_WORKER_METRICS
+            .disconnects_received
+            .add(1, self.attrs.base());
+    }
+
+    /// Increment the `keep_alives_received` counter
+    pub fn inc_keep_alives_received(&self) {
+        LOCAL_WORKER_METRICS
+            .keep_alives_received
+            .add(1, self.attrs.base());
+    }
+
+    /// Wrap an async operation and track precondition metrics
+    pub async fn wrap_preconditions<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        LOCAL_WORKER_METRICS
+            .preconditions_calls
+            .add(1, self.attrs.base());
+        let start = Instant::now();
+        let result = future.await;
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        LOCAL_WORKER_METRICS
+            .preconditions_duration
+            .record(duration_ms, self.attrs.base());
+
+        if result.is_ok() {
+            LOCAL_WORKER_METRICS
+                .preconditions_successes
+                .add(1, self.attrs.base());
+        } else {
+            LOCAL_WORKER_METRICS
+                .preconditions_failures
+                .add(1, self.attrs.base());
+        }
+        result
+    }
+
+    /// Wrap for the action execution flow - passes self to the closure
+    pub async fn wrap<U, T: Future<Output = U>, F: FnOnce(Arc<Self>) -> T>(
         self: Arc<Self>,
         fut: F,
     ) -> U {
