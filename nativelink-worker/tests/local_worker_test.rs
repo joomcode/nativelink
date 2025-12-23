@@ -16,7 +16,7 @@ use core::time::Duration;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
-use std::io::{Write};
+use std::io::Write;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -29,7 +29,9 @@ mod utils {
 }
 
 use hyper::body::Frame;
-use nativelink_config::cas_server::{ExecutionCompletionBehaviour, LocalWorkerConfig, WorkerProperty};
+use nativelink_config::cas_server::{
+    ExecutionCompletionBehaviour, LocalWorkerConfig, WorkerProperty,
+};
 use nativelink_config::stores::{
     FastSlowSpec, FilesystemSpec, MemorySpec, StoreDirection, StoreSpec,
 };
@@ -451,7 +453,7 @@ async fn one_shot_shutdowns_worker_test() -> Result<(), Error> {
                         worker_id: expected_worker_id.clone(),
                     })),
                 })
-                    .unwrap(),
+                .unwrap(),
             ))
             .await
             .map_err(|e| make_input_err!("Could not send : {:?}", e))?;
@@ -486,7 +488,7 @@ async fn one_shot_shutdowns_worker_test() -> Result<(), Error> {
                         worker_id: expected_worker_id.clone(),
                     })),
                 })
-                    .unwrap(),
+                .unwrap(),
             ))
             .await
             .map_err(|e| make_input_err!("Could not send : {:?}", e))?;
@@ -525,7 +527,6 @@ async fn one_shot_shutdowns_worker_test() -> Result<(), Error> {
         .expect_create_and_add_action(Ok(running_action.clone()))
         .await;
 
-
     // Now the RunningAction needs to send a series of state updates. This shortcuts them
     // into a single call (shortcut for prepare, execute, upload, collect_results, cleanup).
     running_action
@@ -534,9 +535,7 @@ async fn one_shot_shutdowns_worker_test() -> Result<(), Error> {
 
     test_context.client.expect_execution_response(Ok(())).await;
 
-    test_context.client
-        .expect_going_away(Ok(()))
-        .await;
+    test_context.client.expect_going_away(Ok(())).await;
 
     Ok(())
 }
