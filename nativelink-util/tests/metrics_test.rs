@@ -18,14 +18,14 @@ use nativelink_util::action_messages::{
 use nativelink_util::common::DigestInfo;
 use nativelink_util::metrics::{
     AGE_BUCKET_LABELS, AgeBuckets, CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS,
-    ExecutionMetricAttrs, ExecutionStage, WORKER_METRICS, WorkerDisconnectReason,
-    execution_output_bytes, make_execution_attributes, peak_memory_sample, pool_available_sample,
-    record_cache_entries_delta, record_completed_execution_metrics, record_connection_acquired,
-    record_connection_reconnect, record_executing_ages, record_execution_cpu_time,
-    record_execution_peak_memory, record_health_check, record_matching_pass, record_queue_ages,
-    record_rpc_served, record_store_tier_io, record_store_tier_read, record_worker_connected,
-    record_worker_disconnected, record_worker_keepalive, record_worker_state, saturating_i64,
-    split_grpc_path,
+    ExecutionMetricAttrs, ExecutionStage, WORKER_METRICS, WORKER_POOL_METRICS,
+    WorkerDisconnectReason, execution_output_bytes, make_execution_attributes, peak_memory_sample,
+    pool_available_sample, record_cache_entries_delta, record_completed_execution_metrics,
+    record_connection_acquired, record_connection_reconnect, record_executing_ages,
+    record_execution_cpu_time, record_execution_peak_memory, record_health_check,
+    record_matching_pass, record_queue_ages, record_rpc_served, record_store_tier_io,
+    record_store_tier_read, record_worker_connected, record_worker_disconnected,
+    record_worker_keepalive, record_worker_state, saturating_i64, split_grpc_path,
 };
 use opentelemetry::KeyValue;
 
@@ -121,6 +121,7 @@ fn test_metrics_lazy_initialization() {
     let _cache_metrics = &*CACHE_METRICS;
     let _execution_metrics = &*EXECUTION_METRICS;
     let _worker_metrics = &*WORKER_METRICS;
+    let _worker_pool_metrics = &*WORKER_POOL_METRICS;
 
     // If we got here without panicking, the metrics were initialized successfully
 }
