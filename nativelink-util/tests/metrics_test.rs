@@ -18,7 +18,7 @@ use nativelink_util::action_messages::{
 use nativelink_util::common::DigestInfo;
 use nativelink_util::metrics::{
     CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage,
-    WORKER_METRICS, execution_output_bytes, make_execution_attributes,
+    WORKER_POOL_METRICS, execution_output_bytes, make_execution_attributes,
     record_completed_execution_metrics,
 };
 use opentelemetry::KeyValue;
@@ -114,7 +114,7 @@ fn test_metrics_lazy_initialization() {
     // Verify that the lazy static initialization works
     let _cache_metrics = &*CACHE_METRICS;
     let _execution_metrics = &*EXECUTION_METRICS;
-    let _worker_metrics = &*WORKER_METRICS;
+    let _worker_pool_metrics = &*WORKER_POOL_METRICS;
 
     // If we got here without panicking, the metrics were initialized successfully
 }

@@ -1314,6 +1314,30 @@ impl DirectoryCache {
         self.config.cache_root.join(format!("{digest}"))
     }
 
+    /// Synchronous snapshot of the counters also reported by
+    /// `MetricsComponent::publish`, for OTEL observable instruments, which
+    /// run their callback synchronously and can't await `Self::cache`'s lock.
+    pub(crate) fn metric_snapshot(&self) -> [(&'static str, u64); 7] {
+        [
+            (
+                "clonefile_hits",
+                self.clonefile_hits.load(Ordering::Relaxed),
+            ),
+            ("hardlink_hits", self.hardlink_hits.load(Ordering::Relaxed)),
+            ("subtree_hits", self.subtree_hits.load(Ordering::Relaxed)),
+            (
+                "subtree_misses",
+                self.subtree_misses.load(Ordering::Relaxed),
+            ),
+            ("evictions", self.evictions.load(Ordering::Relaxed)),
+            ("entries", self.map_entries.load(Ordering::Relaxed)),
+            (
+                "total_size_bytes",
+                self.map_size_bytes.load(Ordering::Relaxed),
+            ),
+        ]
+    }
+
     /// Returns cache statistics
     pub async fn stats(&self) -> CacheStats {
         let cache = self.cache.read().await;
