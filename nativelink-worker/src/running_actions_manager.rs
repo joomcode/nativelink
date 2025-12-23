@@ -43,10 +43,9 @@ use nativelink_config::cas_server::{
     EnvironmentSource, UploadActionResultConfig, UploadCacheResultsStrategy,
 };
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
-use nativelink_metric::MetricsComponent;
 use nativelink_proto::build::bazel::remote::execution::v2::{
-    Action, ActionResult as ProtoActionResult, Command as ProtoCommand,
-    Directory as ProtoDirectory, Directory, DirectoryNode, ExecuteResponse, FileNode, SymlinkNode,
+    Action, ActionResult as ProtoActionResult, Command as ProtoCommand, Directory,
+    Directory as ProtoDirectory, DirectoryNode, ExecuteResponse, FileNode, SymlinkNode,
     Tree as ProtoTree, UpdateActionResultRequest,
 };
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::{
@@ -65,9 +64,10 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::common::{DigestInfo, fs};
 use nativelink_util::digest_hasher::{DigestHasher, DigestHasherFunc};
-use nativelink_util::metrics_utils::{AsyncCounterWrapper, CounterWithTime};
+use nativelink_util::metrics::{RUNNING_ACTIONS_METRICS, register_directory_cache_stats_callback};
 use nativelink_util::store_trait::{Store, StoreLike, UploadSizeInfo};
 use nativelink_util::{background_spawn, spawn, spawn_blocking};
+use opentelemetry::{KeyValue, metrics};
 use parking_lot::Mutex;
 use prost::Message;
 use relative_path::RelativePath;
@@ -1102,7 +1102,7 @@ impl RunningActionImpl {
         }
         let command = {
             // Download and build out our input files/folders. Also fetch and decode our Command.
-            let command_fut = self.metrics().get_proto_command_from_store.wrap(async {
+            let command_fut = self.metrics().wrap_get_proto_command_from_store(async {
                 get_and_decode_digest::<ProtoCommand>(
                     self.running_actions_manager.cas_store.as_ref(),
                     self.action_info.command_digest.into(),
@@ -1121,8 +1121,7 @@ impl RunningActionImpl {
                 // Download the input files/folder and place them into the temp directory.
                 // Use directory cache if available for better performance.
                 self.metrics()
-                    .download_to_directory
-                    .wrap(prepare_action_inputs(
+                    .wrap_download_to_directory(prepare_action_inputs(
                         &self.running_actions_manager.directory_cache,
                         &self.running_actions_manager.cas_store,
                         filesystem_store_pin,
@@ -1159,14 +1158,12 @@ impl RunningActionImpl {
                 }
             };
             self.metrics()
-                .prepare_output_files
-                .wrap(try_join_all(
+                .wrap_prepare_output_files(try_join_all(
                     command.output_files.iter().map(prepare_output_directories),
                 ))
                 .await?;
             self.metrics()
-                .prepare_output_paths
-                .wrap(try_join_all(
+                .wrap_prepare_output_paths(try_join_all(
                     command.output_paths.iter().map(prepare_output_directories),
                 ))
                 .await?;
@@ -1280,7 +1277,7 @@ impl RunningActionImpl {
                         .await
                     {
                         Ok(mut lease) => {
-                            let timer = self.metrics().child_process.begin_timer();
+                            let timer = self.metrics().begin_child_process_timer();
                             let dispatch_result = {
                                 let dispatch_fut =
                                     lease.worker().dispatch_with_timeout(&request, self.timeout);
@@ -1333,9 +1330,9 @@ impl RunningActionImpl {
                             timer.measure();
 
                             if response.exit_code == 0 {
-                                self.metrics().child_process_success_error_code.inc();
+                                self.metrics().inc_child_process_success_error_code();
                             } else {
-                                self.metrics().child_process_failure_error_code.inc();
+                                self.metrics().inc_child_process_failure_error_code();
                             }
                             info!(?args, ?key, "Persistent worker command complete");
                             {
@@ -1560,12 +1557,12 @@ impl RunningActionImpl {
         });
         let mut killed_action = false;
 
-        let timer = self.metrics().child_process.begin_timer();
+        let timer = self.metrics().begin_child_process_timer();
         let mut sleep_fut = (self.running_actions_manager.callbacks.sleep_fn)(self.timeout).fuse();
         loop {
             tokio::select! {
                 () = &mut sleep_fut => {
-                    self.running_actions_manager.metrics.task_timeouts.inc();
+                    self.running_actions_manager.metrics.inc_task_timeouts();
                     killed_action = true;
                     if let Err(err) = child_process_guard.kill().await {
                         error!(
@@ -1625,13 +1622,13 @@ impl RunningActionImpl {
                              `workers.specs[*].resources.limits.memory` or shrink the action's \
                              concurrency."
                         );
-                        self.metrics().child_process_failure_error_code.inc();
+                        self.metrics().inc_child_process_failure_error_code();
                         EXIT_CODE_FOR_SIGNAL
                     }, |exit_code| {
                         if exit_code == 0 {
-                            self.metrics().child_process_success_error_code.inc();
+                            self.metrics().inc_child_process_success_error_code();
                         } else {
-                            self.metrics().child_process_failure_error_code.inc();
+                            self.metrics().inc_child_process_failure_error_code();
                         }
                         exit_code
                     });
@@ -1964,7 +1961,7 @@ impl RunningActionImpl {
             );
         }
 
-        let stdout_digest_fut = self.metrics().upload_stdout.wrap(async {
+        let stdout_digest_fut = self.metrics().wrap_upload_stdout(async {
             let start = std::time::Instant::now();
             let data = execution_result.stdout;
             let data_len = data.len();
@@ -1981,7 +1978,7 @@ impl RunningActionImpl {
             );
             Result::<DigestInfo, Error>::Ok(digest)
         });
-        let stderr_digest_fut = self.metrics().upload_stderr.wrap(async {
+        let stderr_digest_fut = self.metrics().wrap_upload_stderr(async {
             let start = std::time::Instant::now();
             let data = execution_result.stderr;
             let data_len = data.len();
@@ -2120,11 +2117,9 @@ impl RunningAction for RunningActionImpl {
     }
 
     async fn prepare_action(self: Arc<Self>) -> Result<Arc<Self>, Error> {
-        let res = self
-            .metrics()
-            .clone()
-            .prepare_action
-            .wrap(Self::inner_prepare_action(self))
+        let metrics = self.metrics().clone();
+        let res = metrics
+            .wrap_prepare_action(Self::inner_prepare_action(self))
             .await;
         if let Err(ref e) = res {
             warn!(?e, "Error during prepare_action");
@@ -2133,12 +2128,8 @@ impl RunningAction for RunningActionImpl {
     }
 
     async fn execute(self: Arc<Self>) -> Result<Arc<Self>, Error> {
-        let res = self
-            .metrics()
-            .clone()
-            .execute
-            .wrap(Self::inner_execute(self))
-            .await;
+        let metrics = self.metrics().clone();
+        let res = metrics.wrap_execute(Self::inner_execute(self)).await;
         if let Err(ref e) = res {
             warn!(?e, "Error during prepare_action");
         }
@@ -2154,9 +2145,7 @@ impl RunningAction for RunningActionImpl {
             "upload_results: starting with timeout",
         );
         let metrics = self.metrics().clone();
-        let upload_fut = metrics
-            .upload_results
-            .wrap(Self::inner_upload_results(self));
+        let upload_fut = metrics.wrap_upload_results(Self::inner_upload_results(self));
 
         let stall_warn_fut = async {
             let mut elapsed_secs = 0u64;
@@ -2196,11 +2185,9 @@ impl RunningAction for RunningActionImpl {
     }
 
     async fn cleanup(self: Arc<Self>) -> Result<Arc<Self>, Error> {
-        let res = self
-            .metrics()
-            .clone()
-            .cleanup
-            .wrap(async move {
+        let metrics = self.metrics().clone();
+        let res = metrics
+            .wrap_cleanup(async move {
                 let result = do_cleanup(
                     &self.running_actions_manager,
                     &self.operation_id,
@@ -2219,10 +2206,9 @@ impl RunningAction for RunningActionImpl {
     }
 
     async fn get_finished_result(self: Arc<Self>) -> Result<ActionResult, Error> {
-        self.metrics()
-            .clone()
-            .get_finished_result
-            .wrap(Self::inner_get_finished_result(self))
+        let metrics = self.metrics().clone();
+        metrics
+            .wrap_get_finished_result(Self::inner_get_finished_result(self))
             .await
     }
 
@@ -2636,6 +2622,16 @@ impl RunningActionsManagerImpl {
             .get_arc()
             .err_tip(|| "FilesystemStore's internal Arc was lost")?;
         let (action_done_tx, _) = watch::channel(());
+        if let Some(directory_cache) = &args.directory_cache {
+            let weak_directory_cache = Arc::downgrade(directory_cache);
+            register_directory_cache_stats_callback(Box::new(move |observe| {
+                if let Some(directory_cache) = weak_directory_cache.upgrade() {
+                    for (name, value) in directory_cache.metric_snapshot() {
+                        observe(name, value);
+                    }
+                }
+            }));
+        }
         Ok(Self {
             root_action_directory: args.root_action_directory,
             execution_configuration: args.execution_configuration,
@@ -2653,10 +2649,7 @@ impl RunningActionsManagerImpl {
             running_actions: Mutex::new(HashMap::new()),
             action_done_tx,
             callbacks,
-            metrics: Arc::new(Metrics {
-                directory_cache: args.directory_cache.as_ref().map(Arc::downgrade),
-                ..Default::default()
-            }),
+            metrics: Arc::new(Metrics::new()),
             cleaning_up_operations: Mutex::new(HashSet::new()),
             max_cleanup_wait: args.max_cleanup_wait,
             max_cleanup_backoff: args.max_cleanup_backoff,
@@ -2726,7 +2719,7 @@ impl RunningActionsManagerImpl {
                     operation_id,
                     dir_path.display()
                 );
-                self.metrics.stale_removals.inc();
+                self.metrics.inc_stale_removals();
 
                 // Try to remove the directory, with one retry on failure
                 let remove_result = fs::remove_dir_all(&dir_path).await;
@@ -2746,7 +2739,7 @@ impl RunningActionsManagerImpl {
             }
 
             if start.elapsed() > self.max_cleanup_wait {
-                self.metrics.cleanup_wait_timeouts.inc();
+                self.metrics.inc_cleanup_wait_timeouts();
                 warn!(%operation_id, waited=?start.elapsed(), "Timeout waiting for previous operation cleanup");
                 return Err(make_err!(
                     Code::DeadlineExceeded,
@@ -2757,7 +2750,7 @@ impl RunningActionsManagerImpl {
             }
 
             if !has_waited {
-                self.metrics.cleanup_waits.inc();
+                self.metrics.inc_cleanup_waits();
                 has_waited = true;
             }
 
@@ -2782,7 +2775,7 @@ impl RunningActionsManagerImpl {
         &'a self,
         operation_id: &'a OperationId,
     ) -> impl Future<Output = Result<String, Error>> + 'a {
-        self.metrics.make_action_directory.wrap(async move {
+        self.metrics.wrap_make_action_directory(async move {
             let action_directory = format!("{}/{}", self.root_action_directory, operation_id);
             fs::create_dir(&action_directory)
                 .await
@@ -2796,7 +2789,7 @@ impl RunningActionsManagerImpl {
         start_execute: StartExecute,
         queued_timestamp: SystemTime,
     ) -> impl Future<Output = Result<ActionInfo, Error>> + '_ {
-        self.metrics.create_action_info.wrap(async move {
+        self.metrics.wrap_create_action_info(async move {
             let execute_request = start_execute
                 .execute_request
                 .err_tip(|| "Expected execute_request to exist in StartExecute")?;
@@ -2872,14 +2865,12 @@ impl RunningActionsManager for RunningActionsManagerImpl {
         start_execute: StartExecute,
     ) -> Result<Arc<RunningActionImpl>, Error> {
         self.metrics
-            .create_and_add_action
-            .wrap(async move {
+            .wrap_create_and_add_action(async move {
                 let queued_timestamp = start_execute
                     .queued_timestamp
                     .and_then(|time| time.try_into().ok())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
-                let operation_id = start_execute
-                    .operation_id.as_str().into();
+                let operation_id = start_execute.operation_id.as_str().into();
                 let action_info = self.create_action_info(start_execute, queued_timestamp).await?;
                 debug!(
                     ?action_info,
@@ -2946,8 +2937,7 @@ impl RunningActionsManager for RunningActionsManagerImpl {
         hasher: DigestHasherFunc,
     ) -> Result<(), Error> {
         self.metrics
-            .cache_action_result
-            .wrap(self.upload_action_results.cache_action_result(
+            .wrap_cache_action_result(self.upload_action_results.cache_action_result(
                 action_info,
                 action_result,
                 hasher,
@@ -2970,8 +2960,7 @@ impl RunningActionsManager for RunningActionsManagerImpl {
     // Note: When the future returns the process should be fully killed and cleaned up.
     async fn kill_all(&self) {
         self.metrics
-            .kill_all
-            .wrap_no_capture_result(async move {
+            .wrap_kill_all(async move {
                 let kill_operations: Vec<Arc<RunningActionImpl>> = {
                     let running_actions = self.running_actions.lock();
                     running_actions.values().filter_map(Weak::upgrade).collect()
@@ -3000,56 +2989,353 @@ impl RunningActionsManager for RunningActionsManagerImpl {
     }
 }
 
-#[derive(Debug, Default, MetricsComponent)]
+/// Instance-based metrics wrapper that provides helper methods
+/// and reports to global OpenTelemetry metrics.
+#[derive(Debug, Default, Clone)]
 pub struct Metrics {
-    #[metric(help = "Stats about the create_and_add_action command.")]
-    create_and_add_action: AsyncCounterWrapper,
-    #[metric(help = "Stats about the cache_action_result command.")]
-    cache_action_result: AsyncCounterWrapper,
-    #[metric(help = "Stats about the kill_all command.")]
-    kill_all: AsyncCounterWrapper,
-    #[metric(help = "Stats about the create_action_info command.")]
-    create_action_info: AsyncCounterWrapper,
-    #[metric(help = "Stats about the make_work_directory command.")]
-    make_action_directory: AsyncCounterWrapper,
-    #[metric(help = "Stats about the prepare_action command.")]
-    prepare_action: AsyncCounterWrapper,
-    #[metric(help = "Stats about the execute command.")]
-    execute: AsyncCounterWrapper,
-    #[metric(help = "Stats about the upload_results command.")]
-    upload_results: AsyncCounterWrapper,
-    #[metric(help = "Stats about the cleanup command.")]
-    cleanup: AsyncCounterWrapper,
-    #[metric(help = "Stats about the get_finished_result command.")]
-    get_finished_result: AsyncCounterWrapper,
-    #[metric(help = "Number of times an action waited for cleanup to complete.")]
-    cleanup_waits: CounterWithTime,
-    #[metric(help = "Number of stale directories removed during action retries.")]
-    stale_removals: CounterWithTime,
-    #[metric(help = "Number of timeouts while waiting for cleanup to complete.")]
-    cleanup_wait_timeouts: CounterWithTime,
-    #[metric(help = "Stats about the get_proto_command_from_store command.")]
-    get_proto_command_from_store: AsyncCounterWrapper,
-    #[metric(help = "Stats about the download_to_directory command.")]
-    download_to_directory: AsyncCounterWrapper,
-    #[metric(help = "Stats about the prepare_output_files command.")]
-    prepare_output_files: AsyncCounterWrapper,
-    #[metric(help = "Stats about the prepare_output_paths command.")]
-    prepare_output_paths: AsyncCounterWrapper,
-    #[metric(help = "Stats about the child_process command.")]
-    child_process: AsyncCounterWrapper,
-    #[metric(help = "Stats about the child_process_success_error_code command.")]
-    child_process_success_error_code: CounterWithTime,
-    #[metric(help = "Stats about the child_process_failure_error_code command.")]
-    child_process_failure_error_code: CounterWithTime,
-    #[metric(help = "Total time spent uploading stdout.")]
-    upload_stdout: AsyncCounterWrapper,
-    #[metric(help = "Total time spent uploading stderr.")]
-    upload_stderr: AsyncCounterWrapper,
-    #[metric(help = "Total number of task timeouts.")]
-    task_timeouts: CounterWithTime,
-    #[metric(
-        help = "Stats about the input-directory cache (hits, misses, subtree reuse, evictions, size)."
-    )]
-    directory_cache: Option<Weak<crate::directory_cache::DirectoryCache>>,
+    attrs: Vec<KeyValue>,
+}
+
+/// Timer for measuring async operation duration.
+#[derive(Debug)]
+pub struct MetricsTimer {
+    start: Instant,
+    duration_histogram: metrics::Histogram<f64>,
+    success_counter: Option<metrics::Counter<u64>>,
+    attrs: Vec<KeyValue>,
+}
+
+impl MetricsTimer {
+    /// Create a new timer that tracks both duration and success.
+    fn new_with_success(
+        duration_histogram: metrics::Histogram<f64>,
+        success_counter: metrics::Counter<u64>,
+        attrs: Vec<KeyValue>,
+    ) -> Self {
+        Self {
+            start: Instant::now(),
+            duration_histogram,
+            success_counter: Some(success_counter),
+            attrs,
+        }
+    }
+
+    /// Measure the elapsed time and record metrics.
+    pub fn measure(self) {
+        let duration_ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        self.duration_histogram.record(duration_ms, &self.attrs);
+        if let Some(success_counter) = self.success_counter {
+            success_counter.add(1, &self.attrs);
+        }
+    }
+}
+
+impl Metrics {
+    /// Create a new Metrics instance with optional attributes.
+    pub const fn new() -> Self {
+        Self { attrs: Vec::new() }
+    }
+
+    /// Helper to wrap an async operation and track metrics.
+    async fn wrap_async<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        calls_counter: &metrics::Counter<u64>,
+        successes_counter: &metrics::Counter<u64>,
+        failures_counter: &metrics::Counter<u64>,
+        duration_histogram: &metrics::Histogram<f64>,
+        future: F,
+    ) -> Result<T, E> {
+        calls_counter.add(1, &self.attrs);
+        let start = Instant::now();
+        let result = future.await;
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        duration_histogram.record(duration_ms, &self.attrs);
+
+        if result.is_ok() {
+            successes_counter.add(1, &self.attrs);
+        } else {
+            failures_counter.add(1, &self.attrs);
+        }
+        result
+    }
+
+    /// Helper to wrap an async operation that doesn't return a Result.
+    async fn wrap_async_no_result<T, F: Future<Output = T>>(
+        &self,
+        calls_counter: &metrics::Counter<u64>,
+        duration_histogram: &metrics::Histogram<f64>,
+        future: F,
+    ) -> T {
+        calls_counter.add(1, &self.attrs);
+        let start = Instant::now();
+        let result = future.await;
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        duration_histogram.record(duration_ms, &self.attrs);
+        result
+    }
+
+    // Wrapper methods for each operation
+
+    pub async fn wrap_create_and_add_action<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.create_and_add_action_calls,
+            &RUNNING_ACTIONS_METRICS.create_and_add_action_successes,
+            &RUNNING_ACTIONS_METRICS.create_and_add_action_failures,
+            &RUNNING_ACTIONS_METRICS.create_and_add_action_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_cache_action_result<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.cache_action_result_calls,
+            &RUNNING_ACTIONS_METRICS.cache_action_result_successes,
+            &RUNNING_ACTIONS_METRICS.cache_action_result_failures,
+            &RUNNING_ACTIONS_METRICS.cache_action_result_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_kill_all<T, F: Future<Output = T>>(&self, future: F) -> T {
+        self.wrap_async_no_result(
+            &RUNNING_ACTIONS_METRICS.kill_all_calls,
+            &RUNNING_ACTIONS_METRICS.kill_all_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_create_action_info<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.create_action_info_calls,
+            &RUNNING_ACTIONS_METRICS.create_action_info_successes,
+            &RUNNING_ACTIONS_METRICS.create_action_info_failures,
+            &RUNNING_ACTIONS_METRICS.create_action_info_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_make_action_directory<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.make_action_directory_calls,
+            &RUNNING_ACTIONS_METRICS.make_action_directory_successes,
+            &RUNNING_ACTIONS_METRICS.make_action_directory_failures,
+            &RUNNING_ACTIONS_METRICS.make_action_directory_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_prepare_action<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.prepare_action_calls,
+            &RUNNING_ACTIONS_METRICS.prepare_action_successes,
+            &RUNNING_ACTIONS_METRICS.prepare_action_failures,
+            &RUNNING_ACTIONS_METRICS.prepare_action_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_execute<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.execute_calls,
+            &RUNNING_ACTIONS_METRICS.execute_successes,
+            &RUNNING_ACTIONS_METRICS.execute_failures,
+            &RUNNING_ACTIONS_METRICS.execute_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_upload_results<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.upload_results_calls,
+            &RUNNING_ACTIONS_METRICS.upload_results_successes,
+            &RUNNING_ACTIONS_METRICS.upload_results_failures,
+            &RUNNING_ACTIONS_METRICS.upload_results_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_cleanup<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.cleanup_calls,
+            &RUNNING_ACTIONS_METRICS.cleanup_successes,
+            &RUNNING_ACTIONS_METRICS.cleanup_failures,
+            &RUNNING_ACTIONS_METRICS.cleanup_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_get_finished_result<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.get_finished_result_calls,
+            &RUNNING_ACTIONS_METRICS.get_finished_result_successes,
+            &RUNNING_ACTIONS_METRICS.get_finished_result_failures,
+            &RUNNING_ACTIONS_METRICS.get_finished_result_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_get_proto_command_from_store<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.get_proto_command_from_store_calls,
+            &RUNNING_ACTIONS_METRICS.get_proto_command_from_store_successes,
+            &RUNNING_ACTIONS_METRICS.get_proto_command_from_store_failures,
+            &RUNNING_ACTIONS_METRICS.get_proto_command_from_store_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_download_to_directory<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.download_to_directory_calls,
+            &RUNNING_ACTIONS_METRICS.download_to_directory_successes,
+            &RUNNING_ACTIONS_METRICS.download_to_directory_failures,
+            &RUNNING_ACTIONS_METRICS.download_to_directory_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_prepare_output_files<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.prepare_output_files_calls,
+            &RUNNING_ACTIONS_METRICS.prepare_output_files_successes,
+            &RUNNING_ACTIONS_METRICS.prepare_output_files_failures,
+            &RUNNING_ACTIONS_METRICS.prepare_output_files_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_prepare_output_paths<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.prepare_output_paths_calls,
+            &RUNNING_ACTIONS_METRICS.prepare_output_paths_successes,
+            &RUNNING_ACTIONS_METRICS.prepare_output_paths_failures,
+            &RUNNING_ACTIONS_METRICS.prepare_output_paths_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_upload_stdout<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.upload_stdout_calls,
+            &RUNNING_ACTIONS_METRICS.upload_stdout_successes,
+            &RUNNING_ACTIONS_METRICS.upload_stdout_failures,
+            &RUNNING_ACTIONS_METRICS.upload_stdout_duration,
+            future,
+        )
+        .await
+    }
+
+    pub async fn wrap_upload_stderr<T, E, F: Future<Output = Result<T, E>>>(
+        &self,
+        future: F,
+    ) -> Result<T, E> {
+        self.wrap_async(
+            &RUNNING_ACTIONS_METRICS.upload_stderr_calls,
+            &RUNNING_ACTIONS_METRICS.upload_stderr_successes,
+            &RUNNING_ACTIONS_METRICS.upload_stderr_failures,
+            &RUNNING_ACTIONS_METRICS.upload_stderr_duration,
+            future,
+        )
+        .await
+    }
+
+    /// Begin timing a child process execution.
+    pub fn begin_child_process_timer(&self) -> MetricsTimer {
+        RUNNING_ACTIONS_METRICS
+            .child_process_calls
+            .add(1, &self.attrs);
+        MetricsTimer::new_with_success(
+            RUNNING_ACTIONS_METRICS.child_process_duration.clone(),
+            RUNNING_ACTIONS_METRICS.child_process_successes.clone(),
+            self.attrs.clone(),
+        )
+    }
+
+    // Simple counter increments
+
+    pub fn inc_cleanup_waits(&self) {
+        RUNNING_ACTIONS_METRICS.cleanup_waits.add(1, &self.attrs);
+    }
+
+    pub fn inc_stale_removals(&self) {
+        RUNNING_ACTIONS_METRICS.stale_removals.add(1, &self.attrs);
+    }
+
+    pub fn inc_cleanup_wait_timeouts(&self) {
+        RUNNING_ACTIONS_METRICS
+            .cleanup_wait_timeouts
+            .add(1, &self.attrs);
+    }
+
+    pub fn inc_child_process_success_error_code(&self) {
+        RUNNING_ACTIONS_METRICS
+            .child_process_success_error_code
+            .add(1, &self.attrs);
+    }
+
+    pub fn inc_child_process_failure_error_code(&self) {
+        RUNNING_ACTIONS_METRICS
+            .child_process_failure_error_code
+            .add(1, &self.attrs);
+    }
+
+    pub fn inc_task_timeouts(&self) {
+        RUNNING_ACTIONS_METRICS.task_timeouts.add(1, &self.attrs);
+    }
 }
