@@ -38,6 +38,7 @@ async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
     store_manager.add_store(
         "test_push_store",
         store_factory(
+            "test_push_store",
             &StoreSpec::Memory(MemorySpec::default()),
             &store_manager,
             None,

@@ -266,6 +266,7 @@ async fn grpc_scheduler_forwards_the_client_and_resolves_its_operation() -> Resu
     store_manager.add_store(
         "main_cas",
         store_factory(
+            "test",
             &StoreSpec::Memory(MemorySpec::default()),
             &store_manager,
             None,

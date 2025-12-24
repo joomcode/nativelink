@@ -64,6 +64,7 @@ async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
     store_manager.add_store(
         "main_cas",
         store_factory(
+            "main_cas",
             &StoreSpec::Memory(MemorySpec::default()),
             &store_manager,
             None,
@@ -91,7 +92,7 @@ async fn rejects_incomplete_bytestream_without_verification_wrapper()
             } else {
                 memory_spec
             };
-            let store = store_factory(&spec, &manager, None).await?;
+            let store = store_factory("test", &spec, &manager, None).await?;
             manager.add_store("main_cas", store.clone())?;
             let server = Arc::new(make_bytestream_server(&manager, None)?);
             let (tx, handle) = make_stream_and_writer_spawn(server, None);
@@ -115,6 +116,7 @@ async fn make_verify_store_manager() -> Result<Arc<StoreManager>, Error> {
     store_manager.add_store(
         "main_cas",
         store_factory(
+            "test",
             &StoreSpec::Verify(Box::new(VerifySpec {
                 verify_size: true,
                 verify_hash: true,

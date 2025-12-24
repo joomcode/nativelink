@@ -62,6 +62,7 @@ async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
     store_manager.add_store(
         "main_cas",
         store_factory(
+            "main_cas",
             &StoreSpec::Memory(MemorySpec::default()),
             &store_manager,
             None,
@@ -1039,6 +1040,7 @@ async fn make_chunking_store_manager() -> Result<Arc<StoreManager>, Error> {
     store_manager.add_store(
         "chunk_index",
         store_factory(
+            "test",
             &StoreSpec::Memory(MemorySpec::default()),
             &store_manager,
             None,
@@ -1542,6 +1544,7 @@ async fn chunking_on_grpc_store_forbids_index_store() -> Result<(), Box<dyn core
     store_manager.add_store(
         "grpc_cas",
         store_factory(
+            "test",
             &StoreSpec::Grpc(nativelink_config::stores::GrpcSpec {
                 instance_name: "backend".to_string(),
                 endpoints: vec![nativelink_config::stores::GrpcEndpoint {

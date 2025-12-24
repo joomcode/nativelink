@@ -46,6 +46,7 @@ rust_library(
         "src/grpc_store.rs",
         "src/lib.rs",
         "src/memory_store.rs",
+        "src/metrics_store.rs",
         "src/mongo_store.rs",
         "src/noop_store.rs",
         "src/oci_store.rs",

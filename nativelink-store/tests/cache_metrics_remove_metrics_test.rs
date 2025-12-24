@@ -89,7 +89,13 @@ async fn removal_records_each_outcome_and_duration() -> Result<(), Error> {
     let provider = RecordingProvider::default();
     global::set_meter_provider(provider.clone());
     let manager = Arc::new(StoreManager::new());
-    let memory = store_factory(&StoreSpec::Memory(MemorySpec::default()), &manager, None).await?;
+    let memory = store_factory(
+        "test",
+        &StoreSpec::Memory(MemorySpec::default()),
+        &manager,
+        None,
+    )
+    .await?;
     let key = StoreKey::from("repair-entry");
     memory
         .update_oneshot(key.borrow(), "payload".into())

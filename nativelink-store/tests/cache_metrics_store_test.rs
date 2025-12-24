@@ -39,6 +39,7 @@ async fn cache_metrics_store_is_only_constructed_when_configured() -> Result<(),
     let store_manager = Arc::new(StoreManager::new());
 
     let plain_store = store_factory(
+        "test",
         &StoreSpec::Memory(MemorySpec::default()),
         &store_manager,
         None,
@@ -52,6 +53,7 @@ async fn cache_metrics_store_is_only_constructed_when_configured() -> Result<(),
     );
 
     let wrapped_store = store_factory(
+        "test",
         &StoreSpec::CacheMetrics(Box::new(CacheMetricsSpec {
             cache_type: "cas".to_string(),
             allow_remove: false,
@@ -75,6 +77,7 @@ async fn cache_metrics_store_is_only_constructed_when_configured() -> Result<(),
 async fn cache_metrics_store_preserves_backend_store_semantics() -> Result<(), Error> {
     let store_manager = Arc::new(StoreManager::new());
     let store = store_factory(
+        "test",
         &StoreSpec::CacheMetrics(Box::new(CacheMetricsSpec {
             cache_type: "cas".to_string(),
             allow_remove: true,
@@ -174,8 +177,15 @@ async fn repair_truncated_cache(corrupt_tier: &str, truncated: &'static str) -> 
     });
     let directory = tempfile::tempdir()?;
     let manager = Arc::new(StoreManager::new());
-    let memory = store_factory(&StoreSpec::Memory(MemorySpec::default()), &manager, None).await?;
+    let memory = store_factory(
+        "test",
+        &StoreSpec::Memory(MemorySpec::default()),
+        &manager,
+        None,
+    )
+    .await?;
     let filesystem = store_factory(
+        "test",
         &StoreSpec::Filesystem(FilesystemSpec {
             content_path: directory
                 .path()
@@ -190,7 +200,7 @@ async fn repair_truncated_cache(corrupt_tier: &str, truncated: &'static str) -> 
         None,
     )
     .await?;
-    let durable = store_factory(&durable_spec, &manager, None).await?;
+    let durable = store_factory("test", &durable_spec, &manager, None).await?;
     manager.add_store("memory", memory.clone())?;
     manager.add_store("filesystem", filesystem.clone())?;
     manager.add_store("durable", durable.clone())?;
@@ -209,6 +219,7 @@ async fn repair_truncated_cache(corrupt_tier: &str, truncated: &'static str) -> 
         ),
     );
     let store = store_factory(
+        "test",
         &StoreSpec::Verify(Box::new(VerifySpec {
             verify_size: true,
             verify_hash: false,
@@ -308,7 +319,7 @@ async fn verification_preserves_the_only_copy_by_default() -> Result<(), Error> 
             } else {
                 StoreSpec::Memory(MemorySpec::default())
             };
-            let durable = store_factory(&durable_spec, &manager, None).await?;
+            let durable = store_factory("test", &durable_spec, &manager, None).await?;
             manager.add_store("durable", durable.clone())?;
             // An existing config must keep its only copy without opting in to eviction.
             let wrapped_durable = serde_json::from_value(serde_json::json!({
@@ -319,6 +330,7 @@ async fn verification_preserves_the_only_copy_by_default() -> Result<(), Error> 
             }))
             .expect("existing cache_metrics configuration must deserialize");
             let store = store_factory(
+                "test",
                 &StoreSpec::Verify(Box::new(VerifySpec {
                     verify_size: true,
                     verify_hash: false,
