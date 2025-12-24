@@ -32,6 +32,7 @@ async fn cache_metrics_store_is_only_constructed_when_configured() -> Result<(),
     let store_manager = Arc::new(StoreManager::new());
 
     let plain_store = store_factory(
+        "test",
         &StoreSpec::Memory(MemorySpec::default()),
         &store_manager,
         None,
@@ -45,6 +46,7 @@ async fn cache_metrics_store_is_only_constructed_when_configured() -> Result<(),
     );
 
     let wrapped_store = store_factory(
+        "test",
         &StoreSpec::CacheMetrics(Box::new(CacheMetricsSpec {
             cache_type: "cas".to_string(),
             backend: StoreSpec::Memory(MemorySpec::default()),
@@ -67,6 +69,7 @@ async fn cache_metrics_store_is_only_constructed_when_configured() -> Result<(),
 async fn cache_metrics_store_preserves_backend_store_semantics() -> Result<(), Error> {
     let store_manager = Arc::new(StoreManager::new());
     let store = store_factory(
+        "test",
         &StoreSpec::CacheMetrics(Box::new(CacheMetricsSpec {
             cache_type: "cas".to_string(),
             backend: StoreSpec::Memory(MemorySpec::default()),
