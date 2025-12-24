@@ -41,6 +41,7 @@ use crate::common::DigestInfo;
 use crate::digest_hasher::{DigestHasher, DigestHasherFunc, default_digest_hasher_func};
 use crate::fs;
 use crate::health_utils::{HealthRegistryBuilder, HealthStatus, HealthStatusIndicator};
+use crate::metrics::{StoreMetricAttrs, StoreType};
 
 static DEFAULT_DIGEST_SIZE_HEALTH_CHECK: OnceLock<usize> = OnceLock::new();
 /// Default digest size for health check data. Any change in this value
