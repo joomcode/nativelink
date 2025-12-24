@@ -16,10 +16,9 @@ use core::borrow::BorrowMut;
 use core::cmp::{max, min};
 use core::ops::Range;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 
 use async_trait::async_trait;
 use futures::{FutureExt, join};
@@ -35,9 +34,11 @@ use nativelink_util::store_trait::{
     RemoveItemCallback, Store, StoreDriver, StoreKey, StoreLike, StoreOptimizations,
     UploadSizeInfo, slow_update_store_with_file,
 };
+use opentelemetry::{InstrumentationScope, global, metrics};
 use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};
+use nativelink_util::metrics::FAST_SLOW_STORE_METRICS;
 
 // TODO(palfrey) This store needs to be evaluated for more efficient memory usage,
 // there are many copies happening internally.
@@ -57,8 +58,6 @@ pub struct FastSlowStore {
     slow_store: Store,
     slow_direction: StoreDirection,
     weak_self: Weak<Self>,
-    #[metric]
-    metrics: FastSlowStoreMetrics,
     // De-duplicate requests for the fast store, only the first streams, others
     // are blocked.  This may feel like it's causing a slow down of tasks, but
     // actually it's faster because we're not downloading the file multiple
@@ -123,7 +122,6 @@ impl FastSlowStore {
             slow_store,
             slow_direction: spec.slow_direction,
             weak_self: weak_self.clone(),
-            metrics: FastSlowStoreMetrics::default(),
             populating_digests: Mutex::new(HashMap::new()),
         })
     }
@@ -219,17 +217,15 @@ impl FastSlowStore {
                 }
 
                 if !counted_hit {
-                    self.metrics
-                        .slow_store_hit_count
-                        .fetch_add(1, Ordering::Acquire);
+                    FAST_SLOW_STORE_METRICS.slow_store_hit_count.add(1, &[]);
                     counted_hit = true;
                 }
 
                 let output_buf_len = u64::try_from(output_buf.len())
                     .err_tip(|| "Could not output_buf.len() to u64")?;
-                self.metrics
+                FAST_SLOW_STORE_METRICS
                     .slow_store_downloaded_bytes
-                    .fetch_add(output_buf_len, Ordering::Acquire);
+                    .add(output_buf_len, &[]);
 
                 let writer_fut = Self::calculate_range(
                     &(bytes_received..bytes_received + output_buf_len),
@@ -591,15 +587,13 @@ impl StoreDriver for FastSlowStore {
         // TODO(palfrey) Investigate if we should maybe ignore errors here instead of
         // forwarding them up.
         if self.fast_store.has(key.borrow()).await?.is_some() {
-            self.metrics
-                .fast_store_hit_count
-                .fetch_add(1, Ordering::Acquire);
+            FAST_SLOW_STORE_METRICS.fast_store_hit_count.add(1, &[]);
             self.fast_store
                 .get_part(key, writer.borrow_mut(), offset, length)
                 .await?;
-            self.metrics
+            FAST_SLOW_STORE_METRICS
                 .fast_store_downloaded_bytes
-                .fetch_add(writer.get_bytes_written(), Ordering::Acquire);
+                .add(writer.get_bytes_written(), &[]);
             return Ok(());
         }
 
@@ -611,15 +605,13 @@ impl StoreDriver for FastSlowStore {
             || self.fast_direction == StoreDirection::ReadOnly
             || self.fast_direction == StoreDirection::Update
         {
-            self.metrics
-                .slow_store_hit_count
-                .fetch_add(1, Ordering::Acquire);
+            FAST_SLOW_STORE_METRICS.slow_store_hit_count.add(1, &[]);
             self.slow_store
                 .get_part(key, writer.borrow_mut(), offset, length)
                 .await?;
-            self.metrics
+            FAST_SLOW_STORE_METRICS
                 .slow_store_downloaded_bytes
-                .fetch_add(writer.get_bytes_written(), Ordering::Acquire);
+                .add(writer.get_bytes_written(), &[]);
             return Ok(());
         }
 
@@ -663,18 +655,6 @@ impl StoreDriver for FastSlowStore {
         self.slow_store.register_remove_callback(callback)?;
         Ok(())
     }
-}
-
-#[derive(Debug, Default, MetricsComponent)]
-struct FastSlowStoreMetrics {
-    #[metric(help = "Hit count for the fast store")]
-    fast_store_hit_count: AtomicU64,
-    #[metric(help = "Downloaded bytes from the fast store")]
-    fast_store_downloaded_bytes: AtomicU64,
-    #[metric(help = "Hit count for the slow store")]
-    slow_store_hit_count: AtomicU64,
-    #[metric(help = "Downloaded bytes from the slow store")]
-    slow_store_downloaded_bytes: AtomicU64,
 }
 
 default_health_status_indicator!(FastSlowStore);
