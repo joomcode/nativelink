@@ -1565,3 +1565,47 @@ pub struct RunningActionsMetrics {
     // Directory cache metrics (see `DirectoryCacheStatsCallback`)
     pub directory_cache_stat: metrics::ObservableGauge<u64>,
 }
+
+/// Global fast/slow store metrics instruments.
+pub static FAST_SLOW_STORE_METRICS: LazyLock<FastSlowStoreMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    FastSlowStoreMetrics {
+        fast_store_hit_count: meter
+            .u64_counter("fast_slow_store.fast_store.hit_count")
+            .with_description("Hit count for the fast store")
+            .with_unit("{hit}")
+            .build(),
+
+        fast_store_downloaded_bytes: meter
+            .u64_counter("fast_slow_store.fast_store.downloaded_bytes")
+            .with_description("Downloaded bytes from the fast store")
+            .with_unit("By")
+            .build(),
+
+        slow_store_hit_count: meter
+            .u64_counter("fast_slow_store.slow_store.hit_count")
+            .with_description("Hit count for the slow store")
+            .with_unit("{hit}")
+            .build(),
+
+        slow_store_downloaded_bytes: meter
+            .u64_counter("fast_slow_store.slow_store.downloaded_bytes")
+            .with_description("Downloaded bytes from the slow store")
+            .with_unit("By")
+            .build(),
+    }
+});
+
+/// OpenTelemetry metrics instruments for fast/slow store monitoring.
+#[derive(Debug)]
+pub struct FastSlowStoreMetrics {
+    /// Counter of cache hits on the fast store
+    pub fast_store_hit_count: metrics::Counter<u64>,
+    /// Counter of bytes downloaded from the fast store
+    pub fast_store_downloaded_bytes: metrics::Counter<u64>,
+    /// Counter of cache hits on the slow store
+    pub slow_store_hit_count: metrics::Counter<u64>,
+    /// Counter of bytes downloaded from the slow store
+    pub slow_store_downloaded_bytes: metrics::Counter<u64>,
+}
