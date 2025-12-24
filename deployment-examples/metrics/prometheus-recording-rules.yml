@@ -284,3 +284,92 @@ groups:
               sum(rate(nativelink_execution_completed_count[30d]))
             ))
           ) / (1 - 0.99)
+
+  - name: nativelink_stores
+    interval: 30s
+    rules:
+      # Store cache hit rate by store type and name
+      - record: nativelink:store_cache_hit_rate
+        expr: |
+          sum by (store_type, store_name) (
+            rate(nativelink_store_operations{cache_operation_name="read", cache_operation_result="hit"}[5m])
+          ) /
+          sum by (store_type, store_name) (
+            rate(nativelink_store_operations{cache_operation_name="read", cache_operation_result=~"hit|miss"}[5m])
+          )
+
+      # Store read latency percentiles
+      - record: nativelink:store_read_latency_p50
+        expr: |
+          histogram_quantile(0.5,
+            sum by (le, store_type, store_name) (
+              rate(nativelink_store_operation_duration_bucket{cache_operation_name="read"}[5m])
+            )
+          )
+
+      - record: nativelink:store_read_latency_p90
+        expr: |
+          histogram_quantile(0.9,
+            sum by (le, store_type, store_name) (
+              rate(nativelink_store_operation_duration_bucket{cache_operation_name="read"}[5m])
+            )
+          )
+
+      - record: nativelink:store_read_latency_p99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, store_type, store_name) (
+              rate(nativelink_store_operation_duration_bucket{cache_operation_name="read"}[5m])
+            )
+          )
+
+      # Store write latency percentiles
+      - record: nativelink:store_write_latency_p50
+        expr: |
+          histogram_quantile(0.5,
+            sum by (le, store_type, store_name) (
+              rate(nativelink_store_operation_duration_bucket{cache_operation_name="write"}[5m])
+            )
+          )
+
+      - record: nativelink:store_write_latency_p90
+        expr: |
+          histogram_quantile(0.9,
+            sum by (le, store_type, store_name) (
+              rate(nativelink_store_operation_duration_bucket{cache_operation_name="write"}[5m])
+            )
+          )
+
+      - record: nativelink:store_write_latency_p99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, store_type, store_name) (
+              rate(nativelink_store_operation_duration_bucket{cache_operation_name="write"}[5m])
+            )
+          )
+
+      # Store operation rates
+      - record: nativelink:store_read_rate
+        expr: |
+          sum by (store_type, store_name) (
+            rate(nativelink_store_operations{cache_operation_name="read"}[5m])
+          )
+
+      - record: nativelink:store_write_rate
+        expr: |
+          sum by (store_type, store_name) (
+            rate(nativelink_store_operations{cache_operation_name="write"}[5m])
+          )
+
+      # Store error rate
+      - record: nativelink:store_error_rate
+        expr: |
+          sum by (store_type, store_name, cache_operation_name) (
+            rate(nativelink_store_operations{cache_operation_result="error"}[5m])
+          )
+
+      # Overall store hit rate (aggregated across all stores)
+      - record: nativelink:store_overall_hit_rate
+        expr: |
+          sum(rate(nativelink_store_operations{cache_operation_name="read", cache_operation_result="hit"}[5m])) /
+          sum(rate(nativelink_store_operations{cache_operation_name="read", cache_operation_result=~"hit|miss"}[5m]))
