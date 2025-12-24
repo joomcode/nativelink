@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::fmt::{Display, Formatter};
 use std::sync::{LazyLock, OnceLock};
 
 use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
@@ -77,6 +78,8 @@ pub fn register_directory_cache_stats_callback(callback: DirectoryCacheStatsCall
 pub const CACHE_TYPE: &str = "cache.type";
 pub const CACHE_OPERATION: &str = "cache.operation.name";
 pub const CACHE_RESULT: &str = "cache.operation.result";
+pub const STORE_TYPE: &str = "store.type";
+pub const STORE_NAME: &str = "store.name";
 
 /// Metric attribute key for the directory cache statistic name reported by
 /// the `running_actions_directory_cache_stat` observable gauge.
@@ -1608,4 +1611,180 @@ pub struct FastSlowStoreMetrics {
     pub slow_store_hit_count: metrics::Counter<u64>,
     /// Counter of bytes downloaded from the slow store
     pub slow_store_downloaded_bytes: metrics::Counter<u64>,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum StoreType {
+    Azure,
+    Filesystem,
+    S3,
+    Gcs,
+    Grpc,
+    Mongo,
+    Redis,
+    Oci,
+    OntapS3,
+    OntapS3ExistenceCache,
+    Memory,
+    Noop,
+    Compression,
+    Dedup,
+    ExistenceCache,
+    FastSlow,
+    SizePartitioning,
+    CompletenessChecking,
+    Verify,
+    R2,
+    Ref,
+    Shard,
+    Metrics,
+}
+
+impl Display for StoreType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StoreType::Azure => write!(f, "azure"),
+            StoreType::Filesystem => write!(f, "filesystem"),
+            StoreType::S3 => write!(f, "s3"),
+            StoreType::Grpc => write!(f, "grpc"),
+            StoreType::Mongo => write!(f, "mongo"),
+            StoreType::Redis => write!(f, "redis"),
+            StoreType::Gcs => write!(f, "gcs"),
+            StoreType::Oci => write!(f, "oci"),
+            StoreType::OntapS3 => write!(f, "ontap_s3"),
+            StoreType::OntapS3ExistenceCache => write!(f, "ontap_s3_existence_cache"),
+            StoreType::Memory => write!(f, "memory"),
+            StoreType::Noop => write!(f, "noop"),
+            StoreType::Compression => write!(f, "compression"),
+            StoreType::Dedup => write!(f, "dedup"),
+            StoreType::ExistenceCache => write!(f, "existence_cache"),
+            StoreType::FastSlow => write!(f, "fast_slow"),
+            StoreType::SizePartitioning => write!(f, "size_partitioning"),
+            StoreType::CompletenessChecking => write!(f, "completeness_checking"),
+            StoreType::Verify => write!(f, "verify"),
+            StoreType::R2 => write!(f, "r2"),
+            StoreType::Ref => write!(f, "ref"),
+            StoreType::Shard => write!(f, "shard"),
+            StoreType::Metrics => write!(f, "metrics"),
+        }
+    }
+}
+
+pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    StoreMetrics {
+        store_operations: meter
+            .u64_counter("store_operations")
+            .with_description("Total cache operations by type and result")
+            .build(),
+
+        store_operation_duration: meter
+            .f64_histogram("store_operation_duration")
+            .with_description("Duration of store operations in milliseconds")
+            .with_unit("ms")
+            // The range of these is quite large as a store might be backed by
+            // memory, a filesystem, or network storage. The current values were
+            // determined empirically and might need adjustment.
+            .with_boundaries(vec![
+                // Microsecond range
+                0.001, // 1μs
+                0.005, // 5μs
+                0.01,  // 10μs
+                0.05,  // 50μs
+                0.1,   // 100μs
+                // Sub-millisecond range
+                0.2, // 200μs
+                0.5, // 500μs
+                1.0, // 1ms
+                // Low millisecond range
+                2.0,   // 2ms
+                5.0,   // 5ms
+                10.0,  // 10ms
+                20.0,  // 20ms
+                50.0,  // 50ms
+                100.0, // 100ms
+                // Higher latency range
+                200.0,  // 200ms
+                500.0,  // 500ms
+                1000.0, // 1 second
+                2000.0, // 2 seconds
+                5000.0, // 5 seconds
+            ])
+            .build(),
+    }
+});
+
+#[derive(Debug)]
+pub struct StoreMetrics {
+    /// Histogram of store operation durations in milliseconds
+    pub store_operation_duration: metrics::Histogram<f64>,
+    /// Counter of store operations by type and result
+    pub store_operations: metrics::Counter<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreMetricAttrs {
+    cache_hit: Vec<KeyValue>,
+    cache_miss: Vec<KeyValue>,
+
+    read_success: Vec<KeyValue>,
+    read_error: Vec<KeyValue>,
+    write_success: Vec<KeyValue>,
+    write_error: Vec<KeyValue>,
+}
+
+impl StoreMetricAttrs {
+    /// Creates a new set of pre-computed attributes.
+    ///
+    /// The `base_attrs` are included in all attribute combinations (e.g., store
+    /// type, instance ID).
+    #[must_use]
+    pub fn new_with_name(store_type: StoreType, name: &str) -> Self {
+        let make_attrs = |op: CacheOperationName, result: CacheOperationResult| {
+            let mut attrs = vec![
+                KeyValue::new(STORE_TYPE, store_type.to_string()),
+                KeyValue::new(STORE_NAME, name.to_string()),
+            ];
+            attrs.push(KeyValue::new(CACHE_OPERATION, op));
+            attrs.push(KeyValue::new(CACHE_RESULT, result));
+            attrs
+        };
+
+        Self {
+            cache_hit: make_attrs(CacheOperationName::Read, CacheOperationResult::Hit),
+            cache_miss: make_attrs(CacheOperationName::Read, CacheOperationResult::Miss),
+
+            read_success: make_attrs(CacheOperationName::Read, CacheOperationResult::Success),
+            read_error: make_attrs(CacheOperationName::Read, CacheOperationResult::Error),
+            write_success: make_attrs(CacheOperationName::Write, CacheOperationResult::Success),
+            write_error: make_attrs(CacheOperationName::Write, CacheOperationResult::Error),
+        }
+    }
+
+    // Attribute accessors
+    #[must_use]
+    pub fn cache_hit(&self) -> &[KeyValue] {
+        &self.cache_hit
+    }
+    #[must_use]
+    pub fn cache_miss(&self) -> &[KeyValue] {
+        &self.cache_miss
+    }
+    #[must_use]
+    pub fn read_success(&self) -> &[KeyValue] {
+        &self.read_success
+    }
+    #[must_use]
+    pub fn read_error(&self) -> &[KeyValue] {
+        &self.read_error
+    }
+    #[must_use]
+    pub fn write_success(&self) -> &[KeyValue] {
+        &self.write_success
+    }
+    #[must_use]
+    pub fn write_error(&self) -> &[KeyValue] {
+        &self.write_error
+    }
 }
