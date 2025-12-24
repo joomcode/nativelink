@@ -196,7 +196,7 @@ async fn inner_main(
             let health_component_name = format!("stores/{name}");
             let mut health_register_store =
                 health_registry_lock.sub_builder(&health_component_name);
-            let store = store_factory(&spec, &store_manager, Some(&mut health_register_store))
+            let store = store_factory(&name, &spec, &store_manager, Some(&mut health_register_store))
                 .await
                 .err_tip(|| format!("Failed to create store '{name}'"))?;
             store_manager.add_store(&name, store);
