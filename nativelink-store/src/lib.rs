@@ -29,6 +29,7 @@ pub mod gcs_client;
 pub mod gcs_store;
 pub mod grpc_store;
 pub mod memory_store;
+pub mod metrics_store;
 pub mod mongo_store;
 pub mod noop_store;
 pub mod ontap_s3_existence_cache_store;
