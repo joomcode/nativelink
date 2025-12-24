@@ -82,6 +82,7 @@ async fn create_test_store(mock_client: StaticReplayClient) -> Result<Store, Err
 
     let store_manager = Arc::new(StoreManager::new());
     store_factory(
+        "test",
         &StoreSpec::OntapS3ExistenceCache(Box::new(cache_spec)),
         &store_manager,
         None,
