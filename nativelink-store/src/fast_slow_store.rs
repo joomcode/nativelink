@@ -33,7 +33,9 @@ use nativelink_util::buf_channel::{
 };
 use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatusIndicator, default_health_status_indicator};
-use nativelink_util::metrics::{record_store_tier_io, record_store_tier_read};
+use nativelink_util::metrics::{
+    FAST_SLOW_STORE_METRICS, record_store_tier_io, record_store_tier_read,
+};
 use nativelink_util::store_trait::{
     RemoveCallback, Store, StoreDriver, StoreKey, StoreLike, StoreOptimizations, UploadSizeInfo,
     slow_update_store_with_file,
@@ -351,6 +353,7 @@ impl FastSlowStore {
                     self.metrics
                         .slow_store_hit_count
                         .fetch_add(1, Ordering::Acquire);
+                    FAST_SLOW_STORE_METRICS.slow_store_hit_count.add(1, &[]);
                     record_store_tier_read("slow", "hit");
                     counted_hit = true;
                 }
@@ -360,6 +363,9 @@ impl FastSlowStore {
                 self.metrics
                     .slow_store_downloaded_bytes
                     .fetch_add(output_buf_len, Ordering::Acquire);
+                FAST_SLOW_STORE_METRICS
+                    .slow_store_downloaded_bytes
+                    .add(output_buf_len, &[]);
                 record_store_tier_io("slow", "read", output_buf_len);
 
                 let writer_fut = Self::calculate_range(
@@ -894,9 +900,13 @@ impl StoreDriver for FastSlowStore {
                     self.metrics
                         .fast_store_hit_count
                         .fetch_add(1, Ordering::Acquire);
+                    FAST_SLOW_STORE_METRICS.fast_store_hit_count.add(1, &[]);
                     self.metrics
                         .fast_store_downloaded_bytes
                         .fetch_add(writer.get_bytes_written(), Ordering::Acquire);
+                    FAST_SLOW_STORE_METRICS
+                        .fast_store_downloaded_bytes
+                        .add(writer.get_bytes_written(), &[]);
                     record_store_tier_read("fast", "hit");
                     record_store_tier_io("fast", "read", writer.get_bytes_written());
                     return Ok(());
@@ -948,12 +958,16 @@ impl StoreDriver for FastSlowStore {
             self.metrics
                 .slow_store_hit_count
                 .fetch_add(1, Ordering::Acquire);
+            FAST_SLOW_STORE_METRICS.slow_store_hit_count.add(1, &[]);
             self.slow_store
                 .get_part(key, writer.borrow_mut(), offset, length)
                 .await?;
             self.metrics
                 .slow_store_downloaded_bytes
                 .fetch_add(writer.get_bytes_written(), Ordering::Acquire);
+            FAST_SLOW_STORE_METRICS
+                .slow_store_downloaded_bytes
+                .add(writer.get_bytes_written(), &[]);
             record_store_tier_read("slow", "hit");
             record_store_tier_io("slow", "read", writer.get_bytes_written());
             return Ok(());
@@ -968,6 +982,7 @@ impl StoreDriver for FastSlowStore {
             self.metrics
                 .slow_store_hit_count
                 .fetch_add(1, Ordering::Acquire);
+            FAST_SLOW_STORE_METRICS.slow_store_hit_count.add(1, &[]);
             debug!(%key, threshold_bytes = self.bypass_dedup_threshold_bytes, "Bypassing dedup for huge blob");
             self.slow_store
                 .get_part(key, writer.borrow_mut(), offset, length)
@@ -976,6 +991,9 @@ impl StoreDriver for FastSlowStore {
             self.metrics
                 .slow_store_downloaded_bytes
                 .fetch_add(writer.get_bytes_written(), Ordering::Acquire);
+            FAST_SLOW_STORE_METRICS
+                .slow_store_downloaded_bytes
+                .add(writer.get_bytes_written(), &[]);
             record_store_tier_read("slow", "hit");
             record_store_tier_io("slow", "read", writer.get_bytes_written());
             return Ok(());
