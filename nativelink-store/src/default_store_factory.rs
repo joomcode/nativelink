@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use core::pin::Pin;
+use std::env;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -126,7 +127,7 @@ pub fn store_factory<'a>(
 
         let store = Store::new(store);
 
-        return if should_wrap_metrics_store(backend) {
+        return if should_wrap_in_metrics_store(backend) {
             Ok(Store::new(MetricsStore::new(
                 Arc::new(store),
                 name,
@@ -138,7 +139,11 @@ pub fn store_factory<'a>(
     })
 }
 
-fn should_wrap_metrics_store(spec: &StoreSpec) -> bool {
+fn should_wrap_in_metrics_store(spec: &StoreSpec) -> bool {
+    if env::var("NL_STORE_METRICS").is_err() {
+        return false
+    }
+
     matches!(
         spec,
         StoreSpec::Memory(_)

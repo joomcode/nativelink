@@ -1,16 +1,30 @@
 {
   "annotations": {
-    "list": []
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
   },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": null,
   "links": [],
-  "liveNow": false,
   "panels": [
     {
-      "type": "text",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
       "gridPos": {
         "h": 2,
         "w": 24,
@@ -27,18 +41,20 @@
         "content": "# NativeLink Store Metrics\nMonitor cache hit/miss rates and read/write latency for all stores",
         "mode": "markdown"
       },
-      "pluginVersion": "10.3.0"
+      "pluginVersion": "12.2.1",
+      "title": "",
+      "type": "text"
     },
     {
-      "type": "stat",
       "fieldConfig": {
         "defaults": {
+          "mappings": [],
           "thresholds": {
             "mode": "percentage",
             "steps": [
               {
                 "color": "red",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -51,7 +67,8 @@
             ]
           },
           "unit": "percentunit"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 6,
@@ -65,6 +82,7 @@
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -72,32 +90,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"hit\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=~\"hit|miss\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval]))",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"hit\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=~\"hit|miss\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval]))",
           "legendFormat": "Hit Rate",
           "refId": "A"
         }
       ],
-      "title": "Cache Hit Rate"
+      "title": "Cache Hit Rate",
+      "type": "stat"
     },
     {
-      "type": "stat",
       "fieldConfig": {
         "defaults": {
+          "mappings": [],
           "thresholds": {
             "mode": "percentage",
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -110,7 +131,8 @@
             ]
           },
           "unit": "percentunit"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 6,
@@ -124,6 +146,7 @@
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -131,32 +154,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"miss\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=~\"hit|miss\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval]))",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"miss\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=~\"hit|miss\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval]))",
           "legendFormat": "Miss Rate",
           "refId": "A"
         }
       ],
-      "title": "Cache Miss Rate"
+      "title": "Cache Miss Rate",
+      "type": "stat"
     },
     {
-      "type": "stat",
       "fieldConfig": {
         "defaults": {
+          "mappings": [],
           "thresholds": {
             "mode": "percentage",
             "steps": [
               {
                 "color": "red",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -169,7 +195,8 @@
             ]
           },
           "unit": "percentunit"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 6,
@@ -183,6 +210,7 @@
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -190,32 +218,35 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"success\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval]))",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"success\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval]))",
           "legendFormat": "Read Success Rate",
           "refId": "A"
         }
       ],
-      "title": "Read Success Rate"
+      "title": "Read Success Rate",
+      "type": "stat"
     },
     {
-      "type": "stat",
       "fieldConfig": {
         "defaults": {
+          "mappings": [],
           "thresholds": {
             "mode": "percentage",
             "steps": [
               {
                 "color": "red",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -228,7 +259,8 @@
             ]
           },
           "unit": "percentunit"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 6,
@@ -242,6 +274,7 @@
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -249,34 +282,82 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"write\", cache_operation_result=\"success\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval]))",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"write\", cache_operation_result=\"success\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval]))",
           "legendFormat": "Write Success Rate",
           "refId": "A"
         }
       ],
-      "title": "Write Success Rate"
+      "title": "Write Success Rate",
+      "type": "stat"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
-            "spanNulls": true
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "ops"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -296,45 +377,92 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"hit\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval]))",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"hit\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval]))",
           "legendFormat": "Cache Hits",
           "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"miss\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval]))",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"miss\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval]))",
           "legendFormat": "Cache Misses",
           "refId": "B"
         }
       ],
-      "title": "Cache Hits vs Misses"
+      "title": "Cache Hits vs Misses",
+      "type": "timeseries"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
-            "spanNulls": true
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "ops"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -354,35 +482,36 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (cache_operation_result)",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (cache_operation_result)",
           "legendFormat": "Read ({{cache_operation_result}})",
           "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (cache_operation_result)",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (cache_operation_result)",
           "legendFormat": "Write ({{cache_operation_result}})",
           "refId": "B"
         }
       ],
-      "title": "Read/Write Operations"
+      "title": "Read/Write Operations",
+      "type": "timeseries"
     },
     {
-      "type": "row",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -391,20 +520,67 @@
         "y": 16
       },
       "id": 8,
-      "title": "Read Latency"
+      "panels": [],
+      "title": "Read Latency",
+      "type": "row"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
-            "spanNulls": true
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "ms"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -424,54 +600,101 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.50, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.90, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.90, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
           "legendFormat": "p90",
           "refId": "B"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
-      "title": "Read Latency Percentiles (All Stores)"
+      "title": "Read Latency Percentiles (All Stores)",
+      "type": "timeseries"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
-            "spanNulls": true
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "ms"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -491,26 +714,27 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_type))",
+          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_type))",
           "legendFormat": "p99 - {{store_type}}",
           "refId": "A"
         }
       ],
-      "title": "Read Latency p99 by Store Type"
+      "title": "Read Latency p99 by Store Type",
+      "type": "timeseries"
     },
     {
-      "type": "row",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -519,20 +743,67 @@
         "y": 25
       },
       "id": 11,
-      "title": "Write Latency"
+      "panels": [],
+      "title": "Write Latency",
+      "type": "row"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
-            "spanNulls": true
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "ms"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -552,54 +823,101 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.50, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.90, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.90, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
           "legendFormat": "p90",
           "refId": "B"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le))",
           "legendFormat": "p99",
           "refId": "C"
         }
       ],
-      "title": "Write Latency Percentiles (All Stores)"
+      "title": "Write Latency Percentiles (All Stores)",
+      "type": "timeseries"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
-            "spanNulls": true
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "ms"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -619,26 +937,27 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
-      "pluginVersion": "10.3.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_type))",
+          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_type))",
           "legendFormat": "p99 - {{store_type}}",
           "refId": "A"
         }
       ],
-      "title": "Write Latency p99 by Store Type"
+      "title": "Write Latency p99 by Store Type",
+      "type": "timeseries"
     },
     {
-      "type": "row",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -647,23 +966,25 @@
         "y": 34
       },
       "id": 14,
-      "title": "Operations by Store"
+      "panels": [],
+      "title": "Operations by Store",
+      "type": "row"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 20,
             "lineInterpolation": "smooth",
+            "spanNulls": true,
             "stacking": {
               "mode": "normal"
-            },
-            "spanNulls": true
+            }
           },
           "unit": "ops"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -692,30 +1013,31 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type)",
+          "expr": "sum(rate(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type)",
           "legendFormat": "{{store_type}}",
           "refId": "A"
         }
       ],
-      "title": "Operations by Store Type"
+      "title": "Operations by Store Type",
+      "type": "timeseries"
     },
     {
-      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "drawStyle": "line",
             "fillOpacity": 20,
             "lineInterpolation": "smooth",
+            "spanNulls": true,
             "stacking": {
               "mode": "normal"
-            },
-            "spanNulls": true
+            }
           },
           "unit": "ops"
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -744,17 +1066,17 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_name)",
+          "expr": "sum(rate(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_name)",
           "legendFormat": "{{store_name}}",
           "refId": "A"
         }
       ],
-      "title": "Operations by Store Name"
+      "title": "Operations by Store Name",
+      "type": "timeseries"
     },
     {
-      "type": "row",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -763,10 +1085,11 @@
         "y": 43
       },
       "id": 17,
-      "title": "Store Details"
+      "panels": [],
+      "title": "Store Details",
+      "type": "row"
     },
     {
-      "type": "table",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -796,8 +1119,7 @@
                   "mode": "percentage",
                   "steps": [
                     {
-                      "color": "red",
-                      "value": null
+                      "color": "red"
                     },
                     {
                       "color": "yellow",
@@ -832,8 +1154,7 @@
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "green",
-                      "value": null
+                      "color": "green"
                     },
                     {
                       "color": "yellow",
@@ -886,9 +1207,9 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"hit\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type, store_name) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=~\"hit|miss\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type, store_name)",
+          "expr": "sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=\"hit\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type, store_name) / sum(rate(nativelink_store_operations_total{cache_operation_name=\"read\", cache_operation_result=~\"hit|miss\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type, store_name)",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -897,9 +1218,9 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_bucket{store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_type, store_name))",
+          "expr": "histogram_quantile(0.99, sum(rate(nativelink_store_operation_duration_milliseconds_bucket{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_type, store_name))",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -908,9 +1229,9 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_operations_total{store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type, store_name)",
+          "expr": "sum(rate(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_type, store_name)",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -945,10 +1266,10 @@
             }
           }
         }
-      ]
+      ],
+      "type": "table"
     },
     {
-      "type": "heatmap",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -958,11 +1279,12 @@
               "viz": false
             },
             "scaleDistribution": {
-              "type": "log",
-              "log": 2
+              "log": 2,
+              "type": "log"
             }
           }
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -1010,18 +1332,18 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(increase(nativelink_store_operation_duration_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le)",
+          "expr": "sum(increase(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"read\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le)",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
         }
       ],
-      "title": "Read Latency Distribution"
+      "title": "Read Latency Distribution",
+      "type": "heatmap"
     },
     {
-      "type": "heatmap",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1031,11 +1353,12 @@
               "viz": false
             },
             "scaleDistribution": {
-              "type": "log",
-              "log": 2
+              "log": 2,
+              "type": "log"
             }
           }
-        }
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -1083,19 +1406,21 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
+            "uid": "${datasource}"
           },
-          "expr": "sum(increase(nativelink_store_operation_duration_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", store_name=~\"$store_name\"}[$__rate_interval])) by (le)",
+          "expr": "sum(increase(nativelink_store_operation_duration_milliseconds_bucket{cache_operation_name=\"write\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le)",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
         }
       ],
-      "title": "Write Latency Distribution"
+      "title": "Write Latency Distribution",
+      "type": "heatmap"
     }
   ],
+  "preload": false,
   "refresh": "10s",
-  "schemaVersion": 39,
+  "schemaVersion": 42,
   "tags": [
     "nativelink",
     "stores",
@@ -1105,16 +1430,46 @@
     "list": [
       {
         "current": {
-          "selected": true,
+          "text": "vmstorage-dev",
+          "value": "6PUSXUw4k"
+        },
+        "includeAll": false,
+        "label": "Datasource",
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "vmstorage-dev",
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(nativelink_store_operations_total, service_namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": { "qryType": 1, "query": "label_values(nativelink_store_operations_total, service_namespace)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "refresh": 2,
+        "regex": "/^nativelink.*/",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
           "text": "All",
           "value": "$__all"
         },
         "datasource": {
           "type": "prometheus",
-          "uid": "PBFA97CFB590B2093"
+          "uid": "${datasource}"
         },
         "definition": "label_values(nativelink_store_operations_total, store_type)",
-        "hide": 0,
         "includeAll": true,
         "label": "Store Type",
         "multi": true,
@@ -1126,34 +1481,30 @@
         },
         "refresh": 2,
         "regex": "",
-        "skipUrlSync": false,
         "sort": 1,
         "type": "query"
       },
       {
         "current": {
-          "selected": true,
           "text": "All",
           "value": "$__all"
         },
         "datasource": {
           "type": "prometheus",
-          "uid": "PBFA97CFB590B2093"
+          "uid": "${datasource}"
         },
-        "definition": "label_values(nativelink_store_operations_total{store_type=~\"$store_type\"}, store_name)",
-        "hide": 0,
+        "definition": "label_values(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\"}, store_name)",
         "includeAll": true,
         "label": "Store Name",
         "multi": true,
         "name": "store_name",
         "options": [],
         "query": {
-          "query": "label_values(nativelink_store_operations_total{store_type=~\"$store_type\"}, store_name)",
+          "query": "label_values(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\"}, store_name)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
         "regex": "",
-        "skipUrlSync": false,
         "sort": 1,
         "type": "query"
       }
@@ -1167,7 +1518,5 @@
   "timezone": "browser",
   "title": "NativeLink Stores",
   "uid": "nativelink-stores",
-  "version": 1,
-  "weekStart": ""
+  "version": 4
 }
-
