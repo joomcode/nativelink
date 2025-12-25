@@ -124,19 +124,38 @@ pub fn store_factory<'a>(
             store.clone().register_health(health_registry_builder);
         }
 
-        Ok(Store::new(MetricsStore::new(Arc::new(Store::new(store)), name, compute_store_type(backend))))
+        let store = Store::new(store);
+
+        return if should_wrap_metrics_store(backend) {
+            Ok(Store::new(MetricsStore::new(
+                Arc::new(store),
+                name,
+                compute_store_type(backend),
+            )))
+        } else {
+            Ok(store)
+        }
     })
+}
+
+fn should_wrap_metrics_store(spec: &StoreSpec) -> bool {
+    matches!(
+        spec,
+        StoreSpec::Memory(_)
+            | StoreSpec::ExperimentalCloudObjectStore(_)
+            | StoreSpec::ExperimentalMongo(_)
+            | StoreSpec::Filesystem(_)
+            | StoreSpec::RedisStore(_)
+    )
 }
 
 fn compute_store_type(spec: &StoreSpec) -> StoreType {
     match spec {
         StoreSpec::Memory(_) => StoreType::Memory,
-        StoreSpec::ExperimentalCloudObjectStore(s) => {
-            match s {
-                ExperimentalCloudObjectSpec::Aws(_) => StoreType::S3,
-                ExperimentalCloudObjectSpec::Gcs(_) => StoreType::Gcs,
-                ExperimentalCloudObjectSpec::Ontap(_) => StoreType::OntapS3,
-            }
+        StoreSpec::ExperimentalCloudObjectStore(s) => match s {
+            ExperimentalCloudObjectSpec::Aws(_) => StoreType::S3,
+            ExperimentalCloudObjectSpec::Gcs(_) => StoreType::Gcs,
+            ExperimentalCloudObjectSpec::Ontap(_) => StoreType::OntapS3,
         },
         StoreSpec::RedisStore(_) => StoreType::Redis,
         StoreSpec::Verify(_) => StoreType::Verify,
@@ -151,10 +170,10 @@ fn compute_store_type(spec: &StoreSpec) -> StoreType {
         StoreSpec::Grpc(_) => StoreType::Grpc,
         StoreSpec::Noop(_) => StoreType::Noop,
         StoreSpec::ExperimentalMongo(_) => StoreType::Mongo,
-        StoreSpec::Shard(_) => StoreType::Metrics,
+        StoreSpec::RefStore(_) => StoreType::Ref,
+        StoreSpec::Shard(_) => StoreType::Shard,
         _ => {
             panic!("Invalid store spec: {:?}", spec);
         }
     }
 }
-

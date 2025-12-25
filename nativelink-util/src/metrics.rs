@@ -1582,6 +1582,8 @@ pub enum StoreType {
     SizePartitioning,
     CompletenessChecking,
     Verify,
+    Ref,
+    Shard,
     Metrics,
 }
 
@@ -1605,6 +1607,8 @@ impl Display for StoreType {
             StoreType::SizePartitioning => write!(f, "size_partitioning"),
             StoreType::CompletenessChecking => write!(f, "completeness_checking"),
             StoreType::Verify => write!(f, "verify"),
+            StoreType::Ref => write!(f, "ref"),
+            StoreType::Shard => write!(f, "shard"),
             StoreType::Metrics => write!(f, "metrics"),
         }
     }
