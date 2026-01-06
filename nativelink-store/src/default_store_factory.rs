@@ -24,7 +24,6 @@ use nativelink_error::Error;
 use nativelink_util::health_utils::HealthRegistryBuilder;
 use nativelink_util::metrics::StoreType;
 use nativelink_util::store_trait::{Store, StoreDriver};
-
 use crate::completeness_checking_store::CompletenessCheckingStore;
 use crate::compression_store::CompressionStore;
 use crate::dedup_store::DedupStore;
@@ -147,6 +146,7 @@ fn should_wrap_in_metrics_store(spec: &StoreSpec) -> bool {
     matches!(
         spec,
         StoreSpec::Memory(_)
+            | StoreSpec::Grpc(_)
             | StoreSpec::ExperimentalCloudObjectStore(_)
             | StoreSpec::ExperimentalMongo(_)
             | StoreSpec::Filesystem(_)
