@@ -17,10 +17,8 @@
 use std::fmt::{Display, Formatter};
 use std::sync::{LazyLock, OnceLock};
 
-use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
-use tokio::time::Instant;
 use crate::action_messages::ActionStage;
-use crate::metrics_utils::Counter;
+use opentelemetry::{global, metrics, InstrumentationScope, KeyValue, Value};
 
 /// Callback type for observable gauges that report queued action counts.
 /// The callback receives an `Observer` that should be used to record values with attributes.
@@ -67,9 +65,7 @@ pub const EXECUTION_STAGE: &str = "execution_stage";
 pub const EXECUTION_RESULT: &str = "execution_result";
 pub const EXECUTION_INSTANCE: &str = "execution_instance";
 pub const EXECUTION_PRIORITY: &str = "execution_priority";
-pub const EXECUTION_WORKER_ID: &str = "execution_worker_id";
 pub const EXECUTION_EXIT_CODE: &str = "execution_exit_code";
-pub const EXECUTION_ACTION_DIGEST: &str = "execution_action_digest";
 
 /// Cache operation types for metrics classification.
 #[derive(Debug, Clone, Copy)]
@@ -690,14 +686,9 @@ pub struct ExecutionMetrics {
 #[must_use]
 pub fn make_execution_attributes(
     instance_name: &str,
-    worker_id: Option<&str>,
     priority: Option<i32>,
 ) -> Vec<KeyValue> {
     let mut attrs = vec![KeyValue::new(EXECUTION_INSTANCE, instance_name.to_string())];
-
-    if let Some(worker_id) = worker_id {
-        attrs.push(KeyValue::new(EXECUTION_WORKER_ID, worker_id.to_string()));
-    }
 
     if let Some(priority) = priority {
         attrs.push(KeyValue::new(EXECUTION_PRIORITY, i64::from(priority)));
