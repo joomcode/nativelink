@@ -1656,6 +1656,11 @@ pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
                 5000.0, // 5 seconds
             ])
             .build(),
+
+        eviction_count: meter
+            .u64_counter("eviction_count")
+            .with_description("Number of evictions")
+            .build(),
     }
 });
 
@@ -1665,6 +1670,8 @@ pub struct StoreMetrics {
     pub store_operation_duration: metrics::Histogram<f64>,
     /// Counter of store operations by type and result
     pub store_operations: metrics::Counter<u64>,
+    /// Counter of evictions
+    pub eviction_count: metrics::Counter<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1676,6 +1683,7 @@ pub struct StoreMetricAttrs {
     read_error: Vec<KeyValue>,
     write_success: Vec<KeyValue>,
     write_error: Vec<KeyValue>,
+    eviction: Vec<KeyValue>,
 }
 
 impl StoreMetricAttrs {
@@ -1703,6 +1711,7 @@ impl StoreMetricAttrs {
             read_error: make_attrs(CacheOperationName::Read, CacheOperationResult::Error),
             write_success: make_attrs(CacheOperationName::Write, CacheOperationResult::Success),
             write_error: make_attrs(CacheOperationName::Write, CacheOperationResult::Error),
+            eviction: make_attrs(CacheOperationName::Evict, CacheOperationResult::Success),
         }
     }
 
@@ -1730,5 +1739,9 @@ impl StoreMetricAttrs {
     #[must_use]
     pub fn write_error(&self) -> &[KeyValue] {
         &self.write_error
+    }
+    #[must_use]
+    pub fn eviction(&self) -> &[KeyValue] {
+        &self.eviction
     }
 }
