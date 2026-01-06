@@ -156,18 +156,11 @@ impl SchedulerMetrics {
     }
 
     #[must_use]
-    pub fn make_worker_attrs(&self, worker_id: Option<&WorkerId>) -> Vec<KeyValue> {
-        let mut attrs = vec![KeyValue::new(
+    pub fn make_worker_attrs(&self) -> Vec<KeyValue> {
+        vec![KeyValue::new(
             EXECUTION_INSTANCE,
             self.instance_name.clone(),
-        )];
-        if let Some(worker_id) = worker_id {
-            attrs.push(KeyValue::new(
-                nativelink_util::metrics::EXECUTION_WORKER_ID,
-                worker_id.to_string(),
-            ));
-        }
-        attrs
+        )]
     }
 
     #[must_use]
@@ -1203,7 +1196,6 @@ where
             // Build base attributes for metrics
             let mut attrs = nativelink_util::metrics::make_execution_attributes(
                 instance_name,
-                worker_id.as_deref(),
                 priority,
             );
 
