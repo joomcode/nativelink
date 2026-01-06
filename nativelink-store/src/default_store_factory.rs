@@ -166,6 +166,7 @@ fn should_wrap_in_metrics_store(spec: &StoreSpec) -> bool {
     matches!(
         spec,
         StoreSpec::Memory(_)
+            | StoreSpec::Grpc(_)
             | StoreSpec::ExperimentalCloudObjectStore(_)
             | StoreSpec::ExperimentalMongo(_)
             | StoreSpec::Filesystem(_)
