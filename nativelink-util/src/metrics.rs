@@ -1622,29 +1622,20 @@ pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
             // memory, a filesystem, or network storage. The current values were
             // determined empirically and might need adjustment.
             .with_boundaries(vec![
-                // Microsecond range
-                0.001, // 1μs
-                0.005, // 5μs
-                0.01,  // 10μs
-                0.05,  // 50μs
                 0.1,   // 100μs
                 // Sub-millisecond range
-                0.2, // 200μs
                 0.5, // 500μs
                 1.0, // 1ms
                 // Low millisecond range
-                2.0,   // 2ms
                 5.0,   // 5ms
                 10.0,  // 10ms
-                20.0,  // 20ms
                 50.0,  // 50ms
                 100.0, // 100ms
                 // Higher latency range
-                200.0,  // 200ms
                 500.0,  // 500ms
                 1000.0, // 1 second
-                2000.0, // 2 seconds
                 5000.0, // 5 seconds
+                10000.0, // 10 seconds
             ])
             .build(),
 
