@@ -124,17 +124,10 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
         .unique_qualifier
         .instance_name()
         .as_str();
-    let worker_id = awaited_action
-        .worker_id()
-        .map(std::string::ToString::to_string);
     let priority = Some(awaited_action.action_info().priority);
 
     // Build base attributes for metrics
-    let mut attrs = nativelink_util::metrics::make_execution_attributes(
-        instance_name,
-        worker_id.as_deref(),
-        priority,
-    );
+    let mut attrs = nativelink_util::metrics::make_execution_attributes(instance_name, priority);
 
     // Add stage attribute
     let execution_stage: ExecutionStage = (&action_state.stage).into();
@@ -156,7 +149,6 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
             nativelink_util::metrics::record_completed_execution_metrics(
                 action_result,
                 instance_name,
-                worker_id.as_deref(),
                 priority,
             );
         }
@@ -169,11 +161,8 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
 
     // A failed attempt that re-queued the action counts as a retry.
     if is_retry {
-        let retry_attrs = nativelink_util::metrics::make_execution_attributes(
-            instance_name,
-            worker_id.as_deref(),
-            priority,
-        );
+        let retry_attrs =
+            nativelink_util::metrics::make_execution_attributes(instance_name, priority);
         EXECUTION_METRICS.execution_retry_count.add(1, &retry_attrs);
     }
 }
@@ -286,18 +275,11 @@ impl SchedulerMetrics {
     }
 
     #[must_use]
-    pub fn make_worker_attrs(&self, worker_id: Option<&WorkerId>) -> Vec<KeyValue> {
-        let mut attrs = vec![KeyValue::new(
+    pub fn make_worker_attrs(&self) -> Vec<KeyValue> {
+        vec![KeyValue::new(
             EXECUTION_INSTANCE,
             self.instance_name.clone(),
-        )];
-        if let Some(worker_id) = worker_id {
-            attrs.push(KeyValue::new(
-                nativelink_util::metrics::EXECUTION_WORKER_ID,
-                worker_id.to_string(),
-            ));
-        }
-        attrs
+        )]
     }
 
     #[must_use]

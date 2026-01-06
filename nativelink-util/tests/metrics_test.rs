@@ -95,18 +95,12 @@ fn test_execution_metric_attrs() {
 
 #[test]
 fn test_make_execution_attributes() {
-    let attrs = make_execution_attributes("test_instance", Some("worker_456"), Some(100));
+    let attrs = make_execution_attributes("test_instance", Some(100));
 
-    assert_eq!(attrs.len(), 3);
+    assert_eq!(attrs.len(), 2);
     assert!(attrs.iter().any(
         |kv| kv.key.as_str() == "execution_instance" && kv.value.to_string() == "test_instance"
     ));
-    assert!(
-        attrs
-            .iter()
-            .any(|kv| kv.key.as_str() == "execution_worker_id"
-                && kv.value.to_string() == "worker_456")
-    );
     assert!(
         attrs
             .iter()
@@ -254,10 +248,10 @@ fn record_completed_execution_metrics_guards_unpopulated_metadata() {
         ..ActionResult::default()
     };
     // Should record without panicking.
-    record_completed_execution_metrics(&populated, "instance", Some("worker-1"), Some(3));
+    record_completed_execution_metrics(&populated, "instance", Some(3));
 
     // Default (UNIX_EPOCH) metadata must skip the duration records cleanly.
-    record_completed_execution_metrics(&ActionResult::default(), "instance", None, None);
+    record_completed_execution_metrics(&ActionResult::default(), "instance", None);
 }
 
 #[test]

@@ -68,11 +68,9 @@ pub const EXECUTION_STAGE: &str = "execution_stage";
 pub const EXECUTION_RESULT: &str = "execution_result";
 pub const EXECUTION_INSTANCE: &str = "execution_instance";
 pub const EXECUTION_PRIORITY: &str = "execution_priority";
-pub const EXECUTION_WORKER_ID: &str = "execution_worker_id";
 pub const EXECUTION_OUTCOME: &str = "execution_outcome";
 pub const EXECUTION_ACTION_MNEMONIC: &str = "execution_action_mnemonic";
 pub const EXECUTION_EXIT_CODE: &str = "execution_exit_code";
-pub const EXECUTION_ACTION_DIGEST: &str = "execution_action_digest";
 
 // Metric attribute keys for gRPC serving, following OTel rpc semconv.
 pub const RPC_SERVICE: &str = "rpc.service";
@@ -855,16 +853,8 @@ pub fn peak_memory_sample(peak_memory_kb: u64) -> u64 {
 
 /// Helper function to create attributes for execution metrics
 #[must_use]
-pub fn make_execution_attributes(
-    instance_name: &str,
-    worker_id: Option<&str>,
-    priority: Option<i32>,
-) -> Vec<KeyValue> {
+pub fn make_execution_attributes(instance_name: &str, priority: Option<i32>) -> Vec<KeyValue> {
     let mut attrs = vec![KeyValue::new(EXECUTION_INSTANCE, instance_name.to_string())];
-
-    if let Some(worker_id) = worker_id {
-        attrs.push(KeyValue::new(EXECUTION_WORKER_ID, worker_id.to_string()));
-    }
 
     if let Some(priority) = priority {
         attrs.push(KeyValue::new(EXECUTION_PRIORITY, i64::from(priority)));
@@ -877,12 +867,11 @@ pub fn make_execution_attributes(
 pub fn record_completed_execution_metrics(
     action_result: &ActionResult,
     instance_name: &str,
-    worker_id: Option<&str>,
     priority: Option<i32>,
 ) {
     let m = &*EXECUTION_METRICS;
     let md = &action_result.execution_metadata;
-    let base = make_execution_attributes(instance_name, worker_id, priority);
+    let base = make_execution_attributes(instance_name, priority);
 
     let record_secs =
         |hist: &metrics::Histogram<f64>, start: SystemTime, end: SystemTime, attrs: &[KeyValue]| {
