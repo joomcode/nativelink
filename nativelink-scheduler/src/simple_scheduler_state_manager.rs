@@ -1172,9 +1172,6 @@ where
                 .unique_qualifier
                 .instance_name()
                 .as_str();
-            let worker_id = awaited_action
-                .worker_id()
-                .map(std::string::ToString::to_string);
             let priority = Some(awaited_action.action_info().priority);
 
             // Build base attributes for metrics
