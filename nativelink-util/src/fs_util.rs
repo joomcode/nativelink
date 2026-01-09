@@ -48,19 +48,14 @@ pub async fn hardlink_directory_tree(src_dir: &Path, dst_dir: &Path) -> Result<(
         src_dir.display()
     );
 
-    error_if!(
-        dst_dir.exists(),
-        "Destination directory already exists: {}",
-        dst_dir.display()
-    );
-
-    // Create the root destination directory
-    fs::create_dir_all(dst_dir).await.err_tip(|| {
-        format!(
-            "Failed to create destination directory: {}",
-            dst_dir.display()
-        )
-    })?;
+    if !dst_dir.exists() {
+        fs::create_dir_all(dst_dir).await.err_tip(|| {
+            format!(
+                "Failed to create destination directory: {}",
+                dst_dir.display()
+            )
+        })?;
+    }
 
     // Recursively hardlink the directory tree
     hardlink_directory_tree_recursive(src_dir, dst_dir).await
@@ -187,10 +182,7 @@ fn set_readonly_recursive_impl<'a>(
             use std::os::unix::fs::PermissionsExt;
             let mut perms = metadata.permissions();
 
-            // If it's a directory, set to r-xr-xr-x (555)
-            // If it's a file, set to r--r--r-- (444)
-            let mode = if metadata.is_dir() { 0o555 } else { 0o444 };
-            perms.set_mode(mode);
+            perms.set_readonly(true);
 
             fs::set_permissions(path, perms)
                 .await
