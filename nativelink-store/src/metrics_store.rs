@@ -4,9 +4,10 @@ use crate::memory_store::MemoryStore;
 use async_trait::async_trait;
 use nativelink_error::Error;
 use nativelink_metric::MetricsComponent;
+use nativelink_proto::build_event_stream::File;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
-use nativelink_util::metrics::{STORE_METRICS, StoreMetricAttrs, StoreType};
+use nativelink_util::metrics::{StoreMetricAttrs, StoreType, STORE_METRICS};
 use nativelink_util::store_trait::{
     RemoveItemCallback, Store, StoreDriver, StoreKey, StoreLike, UploadSizeInfo,
 };
@@ -25,19 +26,26 @@ impl MetricsStore {
     #[must_use]
     pub fn new(inner: Arc<Store>, name: &str, store_type: StoreType) -> Arc<Self> {
         let attrs = Arc::new(StoreMetricAttrs::new_with_name(store_type, name));
-        if should_add_remove_callback(inner.clone()) {
+        if let Some(fs_store) = inner.downcast_ref::<FilesystemStore>(None) {
             #[derive(Debug)]
             struct EvictionCallback {
                 attrs: Arc<StoreMetricAttrs>,
             }
             impl RemoveItemCallback for EvictionCallback {
-                fn callback<'a>(&'a self, store_key: StoreKey<'a>) -> Pin<Box<dyn Future<Output=()> + Send + 'a>> {
+                fn callback<'a>(
+                    &'a self,
+                    _store_key: StoreKey<'a>,
+                ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
                     Box::pin(async { STORE_METRICS.eviction_count.add(1, self.attrs.eviction()) })
                 }
             }
-            if let Err(e) = inner.register_remove_callback(Arc::new(EvictionCallback { attrs: attrs.clone() })) {
+            if let Err(e) = inner.register_remove_callback(Arc::new(EvictionCallback {
+                attrs: attrs.clone(),
+            })) {
                 tracing::error!("Failed to register remove callback: {:?}", e);
             }
+
+            STORE_METRICS.store_size.record(fs_store.get_len(), &attrs.store_size());
         }
 
         Arc::new(Self {
@@ -101,6 +109,10 @@ impl StoreDriver for MetricsStore {
             STORE_METRICS
                 .store_operation_duration
                 .record(duration_ms as f64, &self.attrs.write_error());
+        }
+
+        if let Some(fs_store) = self.inner.downcast_ref::<FilesystemStore>(None) {
+            STORE_METRICS.store_size.record(fs_store.get_len(), &self.attrs.store_size());
         }
 
         result
@@ -168,5 +180,4 @@ impl HealthStatusIndicator for MetricsStore {
 
 fn should_add_remove_callback(store: Arc<Store>) -> bool {
     store.downcast_ref::<FilesystemStore>(None).is_some()
-        || store.downcast_ref::<MemoryStore>(None).is_some()
 }
