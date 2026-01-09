@@ -108,6 +108,8 @@ struct State<
     #[metric(help = "Total size of all items in the store")]
     sum_store_size: u64,
 
+    store_len: u64,
+
     #[metric(help = "Number of bytes evicted from the store")]
     evicted_bytes: Counter,
     #[metric(help = "Number of items evicted from the store")]
@@ -148,6 +150,7 @@ impl<
             btree.remove(key);
         }
         self.sum_store_size -= eviction_item.data.len();
+        self.store_len -= 1;
         if replaced {
             self.replaced_items.inc();
             self.replaced_bytes.add(eviction_item.data.len());
@@ -234,6 +237,7 @@ where
                 lru: LruCache::unbounded(),
                 btree: None,
                 sum_store_size: 0,
+                store_len: 0,
                 evicted_bytes: Counter::default(),
                 evicted_items: CounterWithTime::default(),
                 replaced_bytes: Counter::default(),
@@ -546,6 +550,10 @@ where
             .await
     }
 
+    pub fn len(&self) -> u64 {
+        self.state.lock().store_len
+    }
+
     fn inner_insert_many<It>(
         &self,
         state: &mut State<K, Q, T, C>,
@@ -572,6 +580,7 @@ where
                 replaced_items.push(old_item);
             }
             state.sum_store_size += new_item_size;
+            state.store_len += 1;
             state.lifetime_inserted_bytes.add(new_item_size);
         }
 
