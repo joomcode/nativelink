@@ -14,7 +14,6 @@ use nativelink_util::store_trait::{
 };
 
 use crate::filesystem_store::FilesystemStore;
-use crate::memory_store::MemoryStore;
 
 #[derive(MetricsComponent, Debug)]
 pub struct MetricsStore {
@@ -26,7 +25,7 @@ impl MetricsStore {
     #[must_use]
     pub fn new(inner: Arc<Store>, name: &str, store_type: StoreType) -> Arc<Self> {
         let attrs = Arc::new(StoreMetricAttrs::new_with_name(store_type, name));
-        if should_add_remove_callback(inner.clone()) {
+        if let Some(fs_store) = inner.downcast_ref::<FilesystemStore>(None) {
             #[derive(Debug)]
             struct EvictionCallback {
                 attrs: Arc<StoreMetricAttrs>,
@@ -34,7 +33,7 @@ impl MetricsStore {
             impl RemoveItemCallback for EvictionCallback {
                 fn callback<'a>(
                     &'a self,
-                    store_key: StoreKey<'a>,
+                    _store_key: StoreKey<'a>,
                 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
                     Box::pin(async { STORE_METRICS.eviction_count.add(1, self.attrs.eviction()) })
                 }
@@ -44,6 +43,10 @@ impl MetricsStore {
             })) {
                 tracing::error!("Failed to register remove callback: {:?}", e);
             }
+
+            STORE_METRICS
+                .store_size
+                .record(fs_store.get_len(), &attrs.store_size());
         }
 
         Arc::new(Self {
@@ -107,6 +110,12 @@ impl StoreDriver for MetricsStore {
             STORE_METRICS
                 .store_operation_duration
                 .record(duration_ms as f64, &self.attrs.write_error());
+        }
+
+        if let Some(fs_store) = self.inner.downcast_ref::<FilesystemStore>(None) {
+            STORE_METRICS
+                .store_size
+                .record(fs_store.get_len(), &self.attrs.store_size());
         }
 
         result
@@ -179,5 +188,4 @@ impl HealthStatusIndicator for MetricsStore {
 
 fn should_add_remove_callback(store: Arc<Store>) -> bool {
     store.downcast_ref::<FilesystemStore>(None).is_some()
-        || store.downcast_ref::<MemoryStore>(None).is_some()
 }
