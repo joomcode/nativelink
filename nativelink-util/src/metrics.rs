@@ -1652,6 +1652,11 @@ pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
             .u64_counter("eviction_count")
             .with_description("Number of evictions")
             .build(),
+
+        store_size: meter
+            .u64_gauge("store_size")
+            .with_description("Number of items in the store")
+            .build(),
     }
 });
 
@@ -1663,6 +1668,8 @@ pub struct StoreMetrics {
     pub store_operations: metrics::Counter<u64>,
     /// Counter of evictions
     pub eviction_count: metrics::Counter<u64>,
+    /// Counter of items in the store
+    pub store_size: metrics::Gauge<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1675,6 +1682,7 @@ pub struct StoreMetricAttrs {
     write_success: Vec<KeyValue>,
     write_error: Vec<KeyValue>,
     eviction: Vec<KeyValue>,
+    store_size: Vec<KeyValue>,
 }
 
 impl StoreMetricAttrs {
@@ -1684,11 +1692,12 @@ impl StoreMetricAttrs {
     /// type, instance ID).
     #[must_use]
     pub fn new_with_name(store_type: StoreType, name: &str) -> Self {
+        let base_attrs = vec![
+            KeyValue::new(STORE_TYPE, store_type.to_string()),
+            KeyValue::new(STORE_NAME, name.to_string()),
+        ];
         let make_attrs = |op: CacheOperationName, result: CacheOperationResult| {
-            let mut attrs = vec![
-                KeyValue::new(STORE_TYPE, store_type.to_string()),
-                KeyValue::new(STORE_NAME, name.to_string()),
-            ];
+            let mut attrs = base_attrs.clone();
             attrs.push(KeyValue::new(CACHE_OPERATION, op));
             attrs.push(KeyValue::new(CACHE_RESULT, result));
             attrs
@@ -1703,6 +1712,7 @@ impl StoreMetricAttrs {
             write_success: make_attrs(CacheOperationName::Write, CacheOperationResult::Success),
             write_error: make_attrs(CacheOperationName::Write, CacheOperationResult::Error),
             eviction: make_attrs(CacheOperationName::Evict, CacheOperationResult::Success),
+            store_size: base_attrs.clone(),
         }
     }
 
@@ -1734,5 +1744,9 @@ impl StoreMetricAttrs {
     #[must_use]
     pub fn eviction(&self) -> &[KeyValue] {
         &self.eviction
+    }
+    #[must_use]
+    pub fn store_size(&self) -> &[KeyValue] {
+        &self.store_size
     }
 }

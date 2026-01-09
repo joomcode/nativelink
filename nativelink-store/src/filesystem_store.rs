@@ -1067,6 +1067,10 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             .ok_or_else(|| make_err!(Code::NotFound, "{digest} not found in filesystem store. This may indicate the file was evicted due to cache pressure. Consider increasing 'max_bytes' in your filesystem store's eviction_policy configuration."))
     }
 
+    pub fn get_len(&self) -> u64 {
+        self.evicting_map.len()
+    }
+
     async fn update_file(
         self: Pin<&Self>,
         mut entry: Fe,
