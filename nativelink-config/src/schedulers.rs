@@ -146,6 +146,15 @@ pub struct SimpleSpec {
         deserialize_with = "convert_duration_with_shellexpand_and_negative"
     )]
     pub worker_match_logging_interval_s: i64,
+
+    /// Enable batch worker matching optimization.
+    /// When enabled, the scheduler will collect queued actions and match them
+    /// to workers in a single batch operation, reducing lock contention.
+    /// This can significantly improve throughput when there are many queued
+    /// actions and workers.
+    /// Default: false
+    #[serde(default)]
+    pub enable_batch_worker_matching: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

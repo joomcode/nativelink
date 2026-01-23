@@ -15,6 +15,7 @@
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
@@ -311,6 +312,21 @@ impl ApiWorkerSchedulerImpl {
         platform_properties: &PlatformProperties,
         full_worker_logging: bool,
     ) -> Option<WorkerId> {
+        self.inner_find_worker_for_action_excluding(
+            platform_properties,
+            &HashSet::new(),
+            full_worker_logging,
+        )
+    }
+
+    /// Finds a worker for an action, excluding workers in the given set.
+    /// This is used by batch matching to avoid assigning the same worker to multiple actions.
+    fn inner_find_worker_for_action_excluding(
+        &self,
+        platform_properties: &PlatformProperties,
+        excluded_workers: &HashSet<WorkerId>,
+        full_worker_logging: bool,
+    ) -> Option<WorkerId> {
         // Use capability index to get candidate workers that match STATIC properties
         // (Exact, Unknown) and have the required property keys (Priority, Minimum).
         // This reduces complexity from O(W × P) to O(P × log(W)) for exact properties.
@@ -329,6 +345,11 @@ impl ApiWorkerSchedulerImpl {
         // The index only does presence checks for Minimum properties since their
         // values change dynamically as jobs are assigned to workers.
         let worker_matches = |(worker_id, w): &(&WorkerId, &Worker)| -> bool {
+            // Skip workers that are already assigned in this batch
+            if excluded_workers.contains(worker_id) {
+                return false;
+            }
+
             if !w.can_accept_work() {
                 if full_worker_logging {
                     info!(
@@ -365,6 +386,31 @@ impl ApiWorkerSchedulerImpl {
                 .find(&worker_matches)
                 .map(|(_, w)| w.id.clone()),
         }
+    }
+
+    /// Batch finds workers for multiple actions in a single pass.
+    /// This reduces lock contention by acquiring the lock once for all actions.
+    /// Returns a vector of (action_index, worker_id) pairs for successful matches.
+    fn inner_batch_find_workers_for_actions(
+        &self,
+        actions: &[&PlatformProperties],
+        full_worker_logging: bool,
+    ) -> Vec<(usize, WorkerId)> {
+        let mut results = Vec::with_capacity(actions.len());
+        let mut assigned_workers: HashSet<WorkerId> = HashSet::new();
+
+        for (idx, platform_properties) in actions.iter().enumerate() {
+            if let Some(worker_id) = self.inner_find_worker_for_action_excluding(
+                platform_properties,
+                &assigned_workers,
+                full_worker_logging,
+            ) {
+                assigned_workers.insert(worker_id.clone());
+                results.push((idx, worker_id));
+            }
+        }
+
+        results
     }
 
     async fn update_action(
@@ -666,6 +712,49 @@ impl ApiWorkerScheduler {
             .find_worker_time_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         result
+    }
+
+    /// Batch finds workers for multiple actions in a single lock acquisition.
+    /// This reduces lock contention compared to calling `find_worker_for_action`
+    /// for each action individually.
+    ///
+    /// Returns a vector of (action_index, worker_id) pairs for successful matches.
+    /// Actions that couldn't be matched to a worker are not included in the result.
+    pub async fn batch_find_workers_for_actions(
+        &self,
+        actions: &[&PlatformProperties],
+        full_worker_logging: bool,
+    ) -> Vec<(usize, WorkerId)> {
+        let start = Instant::now();
+        self.metrics
+            .find_worker_calls
+            .fetch_add(actions.len() as u64, Ordering::Relaxed);
+
+        let inner = self.inner.lock().await;
+        let worker_count = inner.workers.len() as u64;
+        let results =
+            inner.inner_batch_find_workers_for_actions(actions, full_worker_logging);
+
+        // Track metrics
+        self.metrics
+            .workers_iterated
+            .fetch_add(worker_count * actions.len() as u64, Ordering::Relaxed);
+
+        let hits = results.len() as u64;
+        let misses = actions.len() as u64 - hits;
+        self.metrics
+            .find_worker_hits
+            .fetch_add(hits, Ordering::Relaxed);
+        self.metrics
+            .find_worker_misses
+            .fetch_add(misses, Ordering::Relaxed);
+
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics
+            .find_worker_time_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        results
     }
 
     /// Checks to see if the worker exists in the worker pool. Should only be used in unit tests.
