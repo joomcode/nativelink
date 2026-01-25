@@ -63,7 +63,7 @@ pub struct SchedulerMetrics {
 }
 
 use crate::platform_property_manager::PlatformPropertyManager;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerState, WorkerTimestamp, WorkerUpdate};
+use crate::worker::{reduce_platform_properties, Worker, ActionInfoWithProps, WorkerState, WorkerTimestamp, WorkerUpdate};
 use crate::worker_capability_index::WorkerCapabilityIndex;
 use crate::worker_registry::SharedWorkerRegistry;
 use crate::worker_scheduler::WorkerScheduler;
@@ -312,21 +312,6 @@ impl ApiWorkerSchedulerImpl {
         platform_properties: &PlatformProperties,
         full_worker_logging: bool,
     ) -> Option<WorkerId> {
-        self.inner_find_worker_for_action_excluding(
-            platform_properties,
-            &HashSet::new(),
-            full_worker_logging,
-        )
-    }
-
-    /// Finds a worker for an action, excluding workers in the given set.
-    /// This is used by batch matching to avoid assigning the same worker to multiple actions.
-    fn inner_find_worker_for_action_excluding(
-        &self,
-        platform_properties: &PlatformProperties,
-        excluded_workers: &HashSet<WorkerId>,
-        full_worker_logging: bool,
-    ) -> Option<WorkerId> {
         // Use capability index to get candidate workers that match STATIC properties
         // (Exact, Unknown) and have the required property keys (Priority, Minimum).
         // This reduces complexity from O(W × P) to O(P × log(W)) for exact properties.
@@ -345,11 +330,6 @@ impl ApiWorkerSchedulerImpl {
         // The index only does presence checks for Minimum properties since their
         // values change dynamically as jobs are assigned to workers.
         let worker_matches = |(worker_id, w): &(&WorkerId, &Worker)| -> bool {
-            // Skip workers that are already assigned in this batch
-            if excluded_workers.contains(worker_id) {
-                return false;
-            }
-
             if !w.can_accept_work() {
                 if full_worker_logging {
                     info!(
@@ -390,23 +370,42 @@ impl ApiWorkerSchedulerImpl {
 
     /// Batch finds workers for multiple actions in a single pass.
     /// This reduces lock contention by acquiring the lock once for all actions.
-    /// Returns a vector of (action_index, worker_id) pairs for successful matches.
+    /// Returns a map of (action_index, worker_id) pairs for successful matches.
     fn inner_batch_find_workers_for_actions(
         &self,
         actions: &[&PlatformProperties],
         full_worker_logging: bool,
-    ) -> Vec<(usize, WorkerId)> {
-        let mut results = Vec::with_capacity(actions.len());
-        let mut assigned_workers: HashSet<WorkerId> = HashSet::new();
+    ) -> HashMap<usize, WorkerId> {
+        let mut results = HashMap::with_capacity(actions.len());
+        let mut workers_platform_properties = HashMap::new();
 
         for (idx, platform_properties) in actions.iter().enumerate() {
-            if let Some(worker_id) = self.inner_find_worker_for_action_excluding(
-                platform_properties,
-                &assigned_workers,
-                full_worker_logging,
-            ) {
-                assigned_workers.insert(worker_id.clone());
-                results.push((idx, worker_id));
+            let candidates = self
+                .capability_index
+                .find_matching_workers(platform_properties);
+            if candidates.is_empty() {
+                continue;
+            }
+
+            for worker_id in candidates {
+                if let Some(worker) = self.workers.peek(&worker_id) {
+                    if !worker.can_accept_work() {
+                        continue;
+                    }
+
+                    if !workers_platform_properties.contains_key(&worker_id) {
+                        workers_platform_properties.insert(worker_id.clone(), worker.platform_properties.clone());
+                    }
+
+                    if !platform_properties.is_satisfied_by(&workers_platform_properties[&worker_id], full_worker_logging) {
+                        continue;
+                    }
+
+                    reduce_platform_properties(workers_platform_properties.get_mut(&worker_id).unwrap(), platform_properties);
+
+                   results.insert(idx, worker_id.clone());
+                    break;
+                }
             }
         }
 
