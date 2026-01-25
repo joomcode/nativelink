@@ -73,6 +73,18 @@ const fn default_worker_match_logging_interval_s() -> i64 {
     10
 }
 
+/// Default batch interval in milliseconds (100ms).
+/// This is the maximum time between batch matching cycles.
+const fn default_batch_interval_ms() -> u64 {
+    100
+}
+
+/// Default debounce window in milliseconds (20ms).
+/// After a trigger, wait this long to collect more changes before running.
+const fn default_batch_debounce_ms() -> u64 {
+    20
+}
+
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SimpleSpec {
@@ -155,6 +167,29 @@ pub struct SimpleSpec {
     /// Default: false
     #[serde(default)]
     pub enable_batch_worker_matching: bool,
+
+    /// Maximum interval between batch matching cycles (milliseconds).
+    /// Even without triggers, matching runs at least this often.
+    /// Only used when `enable_batch_worker_matching` is true.
+    /// Default: 100ms
+    #[serde(
+        default = "default_batch_interval_ms",
+        deserialize_with = "convert_numeric_with_shellexpand"
+    )]
+    pub batch_interval_ms: u64,
+
+    /// Debounce window after first trigger (milliseconds).
+    /// When a task or worker change notification is received, wait this long
+    /// to collect additional changes before running batch match.
+    /// This improves batching efficiency under bursty load.
+    /// 0 = immediate (no debounce).
+    /// Only used when `enable_batch_worker_matching` is true.
+    /// Default: 20ms
+    #[serde(
+        default = "default_batch_debounce_ms",
+        deserialize_with = "convert_numeric_with_shellexpand"
+    )]
+    pub batch_debounce_ms: u64,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

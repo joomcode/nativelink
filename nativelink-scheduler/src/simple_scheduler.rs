@@ -165,6 +165,14 @@ pub struct SimpleScheduler {
     /// When enabled, actions are collected and matched to workers in a single
     /// batch operation, reducing lock contention.
     enable_batch_worker_matching: bool,
+
+    /// Maximum interval between batch matching cycles.
+    /// Even without triggers, matching runs at least this often.
+    batch_interval: Duration,
+
+    /// Debounce window after first trigger.
+    /// After a notification, wait this long to collect more changes before running.
+    batch_debounce: Duration,
 }
 
 impl core::fmt::Debug for SimpleScheduler {
@@ -443,7 +451,7 @@ impl SimpleScheduler {
             platform_properties_refs.push(&prepared.action_info.platform_properties);
         }
 
-        // Batch find workers for all actions
+        // Batch find workers for all actions (single lock acquisition)
         let matches = self
             .worker_scheduler
             .batch_find_workers_for_actions(&platform_properties_refs, full_worker_logging)
@@ -452,63 +460,74 @@ impl SimpleScheduler {
         let matches_count = matches.len();
         let actions_count = prepared_actions.len();
 
-        // Process the matches
+        if matches.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 1: Extract operation_ids and assign operations to workers
+        // Collect successful assignments for batch worker notification
+        let mut successful_assignments: Vec<(WorkerId, OperationId, ActionInfoWithProps)> =
+            Vec::with_capacity(matches_count);
         let mut result = Ok(());
+
         for (action_idx, worker_id) in matches {
             let prepared = &prepared_actions[action_idx];
 
-            let assign_result = async {
-                // Extract the operation_id from the action_state
-                let operation_id = {
-                    let (action_state, _origin_metadata) = prepared
-                        .action_state_result
-                        .as_state()
-                        .await
-                        .err_tip(|| "Failed to get action_state in batch mode")?;
-                    action_state.client_operation_id.clone()
-                };
-
-                // Tell the matching engine that the operation is being assigned to a worker
-                let assign_result = self
-                    .matching_engine_state_manager
-                    .assign_operation(&operation_id, Ok(&worker_id))
-                    .await
-                    .err_tip(|| "Failed to assign operation in do_try_match_batch");
-
-                if let Err(err) = assign_result {
-                    if err.code == Code::Aborted {
-                        // Operation was cancelled, skip it
-                        return Ok(());
-                    }
-                    return Err(err);
+            // Extract the operation_id from the action_state
+            let operation_id = match prepared.action_state_result.as_state().await {
+                Ok((action_state, _origin_metadata)) => action_state.client_operation_id.clone(),
+                Err(err) => {
+                    warn!(?err, "Failed to get action_state in batch mode, skipping");
+                    continue;
                 }
-
-                // Notify the worker to run the action
-                self.worker_scheduler
-                    .worker_notify_run_action(
-                        worker_id.clone(),
-                        operation_id,
-                        prepared.action_info.clone(),
-                    )
-                    .await
-                    .err_tip(|| "Failed to run worker_notify_run_action in do_try_match_batch")
             };
 
-            let ctx = Context::current_with_baggage(vec![KeyValue::new(
-                ENDUSER_ID,
-                prepared.origin_metadata.identity.clone(),
-            )]);
+            // Tell the matching engine that the operation is being assigned to a worker
+            let assign_result = self
+                .matching_engine_state_manager
+                .assign_operation(&operation_id, Ok(&worker_id))
+                .await
+                .err_tip(|| "Failed to assign operation in do_try_match_batch");
 
-            result = result.merge(
-                info_span!("do_try_match_batch")
-                    .in_scope(|| assign_result)
-                    .with_context(ctx)
-                    .await,
-            );
+            match assign_result {
+                Ok(()) => {
+                    // Assignment successful, queue for batch worker notification
+                    successful_assignments.push((
+                        worker_id,
+                        operation_id,
+                        prepared.action_info.clone(),
+                    ));
+                }
+                Err(err) => {
+                    if err.code == Code::Aborted {
+                        // Operation was cancelled, skip it
+                        continue;
+                    }
+                    result = result.merge(Err(err));
+                }
+            }
+        }
+
+        // Phase 2: Batch notify workers (single lock acquisition)
+        if !successful_assignments.is_empty() {
+            let notify_results = self
+                .worker_scheduler
+                .batch_worker_notify_run_action(successful_assignments)
+                .await;
+
+            // Merge notification results
+            for notify_result in notify_results {
+                result = result.merge(
+                    notify_result
+                        .err_tip(|| "Failed to run batch_worker_notify_run_action in do_try_match_batch"),
+                );
+            }
         }
 
         let total_elapsed = start.elapsed();
-        EXECUTION_METRICS.do_try_match_duration.record(total_elapsed.as_secs_f64(), &[]);
+        EXECUTION_METRICS
+            .do_try_match_duration
+            .record(total_elapsed.as_secs_f64(), &[]);
         if total_elapsed > Duration::from_secs(5) {
             warn!(
                 total_ms = total_elapsed.as_millis(),
@@ -631,6 +650,11 @@ impl SimpleScheduler {
 
         let worker_scheduler_clone = worker_scheduler.clone();
 
+        // Capture batch timing parameters for the matching loop
+        let batch_interval = Duration::from_millis(spec.batch_interval_ms);
+        let batch_debounce = Duration::from_millis(spec.batch_debounce_ms);
+        let enable_batch_worker_matching = spec.enable_batch_worker_matching;
+
         let action_scheduler = Arc::new_cyclic(move |weak_self| -> Self {
             let weak_inner = weak_self.clone();
             let task_worker_matching_spawn =
@@ -639,24 +663,48 @@ impl SimpleScheduler {
                     let mut worker_match_logging_last: Option<Instant> = None;
                     // Break out of the loop only when the inner is dropped.
                     loop {
-                        let task_change_fut = task_change_notify.notified();
-                        let worker_change_fut = worker_change_notify.notified();
-                        tokio::pin!(task_change_fut);
-                        tokio::pin!(worker_change_fut);
-                        // Wait for either of these futures to be ready.
-                        let state_changed = future::select(task_change_fut, worker_change_fut);
-                        if last_match_successful {
-                            let _ = state_changed.await;
+                        // Use hybrid timer + debounce approach for batch mode,
+                        // or the original notification-based approach for sequential mode.
+                        if enable_batch_worker_matching {
+                            // Phase 1: Wait for trigger OR batch_interval timeout
+                            let deadline = tokio::time::Instant::now() + batch_interval;
+
+                            let triggered = tokio::select! {
+                                _ = task_change_notify.notified() => true,
+                                _ = worker_change_notify.notified() => true,
+                                _ = tokio::time::sleep_until(deadline) => false,
+                            };
+
+                            // Phase 2: If triggered, apply debounce window to collect more changes
+                            // But don't exceed the original batch_interval deadline
+                            if triggered && batch_debounce > Duration::ZERO {
+                                let debounce_until = tokio::time::Instant::now() + batch_debounce;
+                                let effective_deadline = debounce_until.min(deadline);
+                                tokio::time::sleep_until(effective_deadline).await;
+                            }
+
+                            // If last match failed, add extra delay to avoid hard loop
+                            if !last_match_successful {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
                         } else {
-                            // If the last match failed, then run again after a short sleep.
-                            // This resolves issues where we tried to re-schedule a job to
-                            // a disconnected worker.  The sleep ensures we don't enter a
-                            // hard loop if there's something wrong inside do_try_match.
-                            let sleep_fut = tokio::time::sleep(Duration::from_millis(100));
-                            tokio::pin!(sleep_fut);
-                            let _ = future::select(state_changed, sleep_fut).await;
+                            // Original notification-based approach for sequential mode
+                            let task_change_fut = task_change_notify.notified();
+                            let worker_change_fut = worker_change_notify.notified();
+                            tokio::pin!(task_change_fut);
+                            tokio::pin!(worker_change_fut);
+                            let state_changed = future::select(task_change_fut, worker_change_fut);
+                            if last_match_successful {
+                                let _ = state_changed.await;
+                            } else {
+                                // If the last match failed, then run again after a short sleep.
+                                let sleep_fut = tokio::time::sleep(Duration::from_millis(100));
+                                tokio::pin!(sleep_fut);
+                                let _ = future::select(state_changed, sleep_fut).await;
+                            }
                         }
 
+                        // Phase 3: Run the matching
                         let result = match weak_inner.upgrade() {
                             Some(scheduler) => {
                                 let now = Instant::now();
@@ -775,6 +823,8 @@ impl SimpleScheduler {
                 task_worker_matching_spawn,
                 worker_match_logging_interval,
                 enable_batch_worker_matching: spec.enable_batch_worker_matching,
+                batch_interval: Duration::from_millis(spec.batch_interval_ms),
+                batch_debounce: Duration::from_millis(spec.batch_debounce_ms),
             }
         });
         (action_scheduler, worker_scheduler_clone)
