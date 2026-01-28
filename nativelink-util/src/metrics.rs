@@ -658,6 +658,26 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
                 }
             })
             .build(),
+
+        do_try_match_duration: meter
+            .f64_histogram("do_try_match_duration")
+            .with_description("Duration of do_try_match in seconds")
+            .with_unit("s")
+            .with_boundaries(vec![
+                0.01,   // 10ms
+                0.1,    // 100ms
+                1.0,    // 1s
+                10.0,   // 10s
+                60.0,   // 1 minute
+                300.0,  // 5 minutes
+                600.0,  // 10 minutes
+                1200.0, // 20 minutes
+                1800.0, // 30 minutes
+                2400.0, // 40 minutes
+                3000.0, // 50 minutes
+                3600.0, // 1 hour
+            ])
+            .build(),
     }
 });
 
@@ -688,6 +708,8 @@ pub struct ExecutionMetrics {
     pub execution_actions_count: metrics::Gauge<u64>,
     // Gauge of queued actions by platform properties
     pub execution_queued_actions_count: metrics::ObservableGauge<u64>,
+    /// Duration of `do_try_match` in ms
+    pub do_try_match_duration: metrics::Histogram<f64>,
 }
 
 /// Helper function to create attributes for execution metrics
