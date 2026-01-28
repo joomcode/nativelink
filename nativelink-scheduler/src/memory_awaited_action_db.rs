@@ -18,7 +18,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use async_lock::Mutex;
+use async_lock::RwLock;
 use futures::{FutureExt, Stream};
 use nativelink_config::stores::EvictionPolicy;
 use nativelink_error::{Code, Error, ResultExt, error_if, make_err};
@@ -910,7 +910,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync> AwaitedActionDbI
 #[derive(Debug, MetricsComponent)]
 pub struct MemoryAwaitedActionDb<I: InstantWrapper, NowFn: Fn() -> I> {
     #[metric]
-    inner: Arc<Mutex<AwaitedActionDbImpl<I, NowFn>>>,
+    inner: Arc<RwLock<AwaitedActionDbImpl<I, NowFn>>>,
     tasks_change_notify: Arc<Notify>,
     _handle_awaited_action_events: JoinHandleDropGuard<()>,
 }
@@ -924,7 +924,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static>
         now_fn: NowFn,
     ) -> Self {
         let (action_event_tx, mut action_event_rx) = mpsc::unbounded_channel();
-        let inner = Arc::new(Mutex::new(AwaitedActionDbImpl {
+        let inner = Arc::new(RwLock::new(AwaitedActionDbImpl {
             client_operation_to_awaited_action: EvictingMap::new(eviction_config, (now_fn)()),
             operation_id_to_awaited_action: BTreeMap::new(),
             action_info_hash_key_to_awaited_action: HashMap::new(),
@@ -947,7 +947,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static>
                     let Some(inner) = weak_inner.upgrade() else {
                         return; // Nothing to cleanup, our struct is dropped.
                     };
-                    let mut inner = inner.lock().await;
+                    let mut inner = inner.write().await;
                     inner
                         .handle_action_events(dropped_operation_ids.drain(..))
                         .await;
@@ -967,7 +967,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
         client_operation_id: &OperationId,
     ) -> Result<Option<Self::Subscriber>, Error> {
         self.inner
-            .lock()
+            .read()
             .await
             .get_awaited_action_by_id(client_operation_id)
             .await
@@ -980,7 +980,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
             Bound::Unbounded,
             Bound::Unbounded,
             move |start, end, mut output| async move {
-                let inner = self.inner.lock().await;
+                let inner = self.inner.read().await;
                 let mut maybe_new_start = None;
 
                 for (operation_id, item) in
@@ -1000,11 +1000,11 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
         &self,
         operation_id: &OperationId,
     ) -> Result<Option<Self::Subscriber>, Error> {
-        Ok(self.inner.lock().await.get_by_operation_id(operation_id))
+        Ok(self.inner.read().await.get_by_operation_id(operation_id))
     }
 
     async fn get_queued_actions(&self) -> Result<Vec<Arc<AwaitedAction>>, Error> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
 
         Ok(inner
             .sorted_action_info_hash_keys
@@ -1030,7 +1030,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
             start,
             end,
             move |start, end, mut output| async move {
-                let inner = self.inner.lock().await;
+                let inner = self.inner.read().await;
                 let mut done = true;
                 let mut new_start = start.as_ref();
                 let mut new_end = end.as_ref();
@@ -1073,14 +1073,14 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
         let mut results: HashMap<CountableActionStage, usize> =
             HashMap::with_capacity(stages.len());
         for stage in stages {
-            results.insert(stage, self.inner.lock().await.count_actions(stage));
+            results.insert(stage, self.inner.write().await.count_actions(stage));
         }
         Ok(results)
     }
 
     async fn update_awaited_action(&self, new_awaited_action: AwaitedAction) -> Result<(), Error> {
         self.inner
-            .lock()
+            .write()
             .await
             .update_awaited_action(new_awaited_action)?;
         self.tasks_change_notify.notify_one();
@@ -1095,7 +1095,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
     ) -> Result<Self::Subscriber, Error> {
         let subscriber = self
             .inner
-            .lock()
+            .write()
             .await
             .add_action(client_operation_id, action_info)
             .await?;
