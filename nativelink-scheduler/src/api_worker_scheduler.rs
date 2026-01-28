@@ -15,16 +15,17 @@
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
-use async_lock::Mutex;
+use async_lock::RwLock;
 use lru::LruCache;
 use nativelink_config::schedulers::WorkerAllocationStrategy;
-use nativelink_error::{Code, Error, ResultExt, error_if, make_err, make_input_err};
+use nativelink_error::{error_if, make_err, make_input_err, Code, Error, ResultExt};
 use nativelink_metric::{
-    MetricFieldData, MetricKind, MetricPublishKnownKindData, MetricsComponent,
-    RootMetricsComponent, group,
+    group, MetricFieldData, MetricKind, MetricPublishKnownKindData,
+    MetricsComponent, RootMetricsComponent,
 };
 use nativelink_util::action_messages::{OperationId, WorkerId};
 use nativelink_util::metrics::{WORKER_POOL_METRICS, WORKER_POOL_INSTANCE, WorkerPoolMetricAttrs};
@@ -62,7 +63,7 @@ pub struct SchedulerMetrics {
 }
 
 use crate::platform_property_manager::PlatformPropertyManager;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerState, WorkerTimestamp, WorkerUpdate};
+use crate::worker::{reduce_platform_properties, Worker, ActionInfoWithProps, WorkerState, WorkerTimestamp, WorkerUpdate};
 use crate::worker_capability_index::WorkerCapabilityIndex;
 use crate::worker_registry::SharedWorkerRegistry;
 use crate::worker_scheduler::WorkerScheduler;
@@ -370,6 +371,50 @@ impl ApiWorkerSchedulerImpl {
         }
     }
 
+    /// Batch finds workers for multiple actions in a single pass.
+    /// This reduces lock contention by acquiring the lock once for all actions.
+    /// Returns a map of (action_index, worker_id) pairs for successful matches.
+    fn inner_batch_find_workers_for_actions(
+        &self,
+        actions: &[&PlatformProperties],
+        full_worker_logging: bool,
+    ) -> HashMap<usize, WorkerId> {
+        let mut results = HashMap::with_capacity(actions.len());
+        let mut workers_platform_properties = HashMap::new();
+
+        for (idx, platform_properties) in actions.iter().enumerate() {
+            let candidates = self
+                .capability_index
+                .find_matching_workers(platform_properties);
+            if candidates.is_empty() {
+                continue;
+            }
+
+            for worker_id in candidates {
+                if let Some(worker) = self.workers.peek(&worker_id) {
+                    if !worker.can_accept_work() {
+                        continue;
+                    }
+
+                    if !workers_platform_properties.contains_key(&worker_id) {
+                        workers_platform_properties.insert(worker_id.clone(), worker.platform_properties.clone());
+                    }
+
+                    if !platform_properties.is_satisfied_by(&workers_platform_properties[&worker_id], full_worker_logging) {
+                        continue;
+                    }
+
+                    reduce_platform_properties(workers_platform_properties.get_mut(&worker_id).unwrap(), platform_properties);
+
+                   results.insert(idx, worker_id.clone());
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
     async fn update_action(
         &mut self,
         worker_id: &WorkerId,
@@ -505,6 +550,76 @@ impl ApiWorkerSchedulerImpl {
         }
     }
 
+    /// Batch notifies multiple workers to run actions in a single lock hold.
+    /// Returns a vector of results for each notification attempt.
+    async fn inner_batch_worker_notify_run_action(
+        &mut self,
+        assignments: Vec<(WorkerId, OperationId, ActionInfoWithProps)>,
+    ) -> Vec<Result<(), Error>> {
+        let mut results = Vec::with_capacity(assignments.len());
+        let mut workers_to_evict: Vec<(WorkerId, Error, bool)> = Vec::new();
+
+        for (worker_id, operation_id, action_info) in assignments {
+            if let Some(worker) = self.workers.get_mut(&worker_id) {
+                let notify_worker_result = worker
+                    .notify_update(WorkerUpdate::RunAction((
+                        operation_id.clone(),
+                        action_info.clone(),
+                    )))
+                    .await;
+
+                if let Err(notify_err) = notify_worker_result {
+                    warn!(
+                        ?worker_id,
+                        ?action_info,
+                        ?notify_err,
+                        "Worker command failed in batch notify, will remove worker",
+                    );
+
+                    let is_disconnect = notify_err.code == Code::Internal
+                        && notify_err.messages.len() == 1
+                        && notify_err.messages[0] == "Worker Disconnected";
+
+                    let err = make_err!(
+                        Code::Internal,
+                        "Worker command failed, removing worker {worker_id} -- {notify_err:?}",
+                    );
+
+                    workers_to_evict.push((worker_id.clone(), err.clone(), is_disconnect));
+                    results.push(Err(err));
+                } else {
+                    results.push(Ok(()));
+                }
+            } else {
+                warn!(
+                    ?worker_id,
+                    %operation_id,
+                    ?action_info,
+                    "Worker not found in worker map in batch_worker_notify_run_action"
+                );
+                // Queue the operation to be put back to queued state
+                let update_result = self
+                    .worker_state_manager
+                    .update_operation(
+                        &operation_id,
+                        &worker_id,
+                        UpdateOperationType::UpdateWithDisconnect,
+                    )
+                    .await;
+                results.push(update_result);
+            }
+        }
+
+        // Evict failed workers after processing all notifications
+        for (worker_id, err, is_disconnect) in workers_to_evict {
+            let _ = self
+                .immediate_evict_worker(&worker_id, err, is_disconnect)
+                .await;
+        }
+
+        results
+    }
+
     /// Evicts the worker from the pool and puts items back into the queue if anything was being executed on it.
     async fn immediate_evict_worker(
         &mut self,
@@ -543,7 +658,7 @@ impl ApiWorkerSchedulerImpl {
 #[derive(Debug, MetricsComponent)]
 pub struct ApiWorkerScheduler {
     #[metric]
-    inner: Mutex<ApiWorkerSchedulerImpl>,
+    inner: RwLock<ApiWorkerSchedulerImpl>,
     #[metric(group = "platform_property_manager")]
     platform_property_manager: Arc<PlatformPropertyManager>,
 
@@ -572,7 +687,7 @@ impl ApiWorkerScheduler {
         instance_name: impl Into<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(ApiWorkerSchedulerImpl {
+            inner: RwLock::new(ApiWorkerSchedulerImpl {
                 workers: Workers(LruCache::unbounded()),
                 worker_state_manager: worker_state_manager.clone(),
                 allocation_strategy,
@@ -609,7 +724,7 @@ impl ApiWorkerScheduler {
         self.metrics
             .actions_dispatched
             .fetch_add(1, Ordering::Relaxed);
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         let result = inner
             .worker_notify_run_action(worker_id, operation_id, action_info)
             .await;
@@ -623,6 +738,39 @@ impl ApiWorkerScheduler {
         self.worker_scheduler_metrics.record_running_actions_count(inner.count_running_actions());
 
         result
+    }
+
+    /// Batch notifies multiple workers to run actions in a single lock acquisition.
+    /// This reduces lock contention compared to calling `worker_notify_run_action`
+    /// for each action individually.
+    ///
+    /// Returns a vector of results corresponding to each assignment in the input.
+    pub async fn batch_worker_notify_run_action(
+        &self,
+        assignments: Vec<(WorkerId, OperationId, ActionInfoWithProps)>,
+    ) -> Vec<Result<(), Error>> {
+        let count = assignments.len();
+        self.metrics
+            .actions_dispatched
+            .fetch_add(count as u64, Ordering::Relaxed);
+
+        let mut inner = self.inner.write().await;
+        let results = inner.inner_batch_worker_notify_run_action(assignments).await;
+
+        // Record metrics
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let failures = count - successes;
+
+        for _ in 0..successes {
+            self.worker_scheduler_metrics.record_action_dispatched();
+        }
+        for _ in 0..failures {
+            self.worker_scheduler_metrics.record_dispatch_failure();
+        }
+        self.worker_scheduler_metrics
+            .record_running_actions_count(inner.count_running_actions());
+
+        results
     }
 
     /// Returns the scheduler metrics for observability.
@@ -645,7 +793,7 @@ impl ApiWorkerScheduler {
             .find_worker_calls
             .fetch_add(1, Ordering::Relaxed);
 
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         let worker_count = inner.workers.len() as u64;
         let result = inner.inner_find_worker_for_action(platform_properties, full_worker_logging);
 
@@ -671,10 +819,53 @@ impl ApiWorkerScheduler {
         result
     }
 
+    /// Batch finds workers for multiple actions in a single lock acquisition.
+    /// This reduces lock contention compared to calling `find_worker_for_action`
+    /// for each action individually.
+    ///
+    /// Returns a vector of (action_index, worker_id) pairs for successful matches.
+    /// Actions that couldn't be matched to a worker are not included in the result.
+    pub async fn batch_find_workers_for_actions(
+        &self,
+        actions: &[&PlatformProperties],
+        full_worker_logging: bool,
+    ) -> HashMap<usize, WorkerId> {
+        let start = Instant::now();
+        self.metrics
+            .find_worker_calls
+            .fetch_add(actions.len() as u64, Ordering::Relaxed);
+
+        let inner = self.inner.read().await;
+        let worker_count = inner.workers.len() as u64;
+        let results =
+            inner.inner_batch_find_workers_for_actions(actions, full_worker_logging);
+
+        // Track metrics
+        self.metrics
+            .workers_iterated
+            .fetch_add(worker_count * actions.len() as u64, Ordering::Relaxed);
+
+        let hits = results.len() as u64;
+        let misses = actions.len() as u64 - hits;
+        self.metrics
+            .find_worker_hits
+            .fetch_add(hits, Ordering::Relaxed);
+        self.metrics
+            .find_worker_misses
+            .fetch_add(misses, Ordering::Relaxed);
+
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics
+            .find_worker_time_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        results
+    }
+
     /// Checks to see if the worker exists in the worker pool. Should only be used in unit tests.
     #[must_use]
     pub async fn contains_worker_for_test(&self, worker_id: &WorkerId) -> bool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.workers.contains(worker_id)
     }
 
@@ -683,7 +874,7 @@ impl ApiWorkerScheduler {
         &self,
         worker_id: &WorkerId,
     ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         let worker = inner.workers.get_mut(worker_id).ok_or_else(|| {
             make_input_err!("WorkerId '{}' does not exist in workers map", worker_id)
         })?;
@@ -691,7 +882,7 @@ impl ApiWorkerScheduler {
     }
 
     pub async fn get_workers_state(&self) -> Vec<WorkerState> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.workers.iter().map(|(_, w)| w.to_state()).collect()
     }
 }
@@ -705,7 +896,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
     async fn add_worker(&self, worker: Worker) -> Result<(), Error> {
         let worker_id = worker.id.clone();
         let worker_timestamp = worker.last_update_timestamp;
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         if inner.shutting_down {
             warn!("Rejected worker add during shutdown: {}", worker_id);
             return Err(make_err!(
@@ -748,7 +939,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
             UpdateOperationType::UpdateWithError(_) | UpdateOperationType::UpdateWithDisconnect
         );
 
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         let result = inner.update_action(worker_id, operation_id, update).await;
 
         // Record action completion metric
@@ -766,7 +957,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
         timestamp: WorkerTimestamp,
     ) -> Result<(), Error> {
         {
-            let mut inner = self.inner.lock().await;
+            let mut inner = self.inner.write().await;
             inner
                 .refresh_lifetime(worker_id, timestamp)
                 .err_tip(|| "Error refreshing lifetime in worker_keep_alive_received()")?;
@@ -781,7 +972,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
     async fn remove_worker(&self, worker_id: &WorkerId) -> Result<(), Error> {
         self.worker_registry.remove_worker(worker_id).await;
 
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         let result = inner
             .immediate_evict_worker(
                 worker_id,
@@ -797,7 +988,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
     }
 
     async fn shutdown(&self, shutdown_guard: ShutdownGuard) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         inner.shutting_down = true; // should reject further worker registration
         while let Some(worker_id) = inner
             .workers
@@ -825,8 +1016,9 @@ impl WorkerScheduler for ApiWorkerScheduler {
         let now = UNIX_EPOCH + Duration::from_secs(now_timestamp);
         let timeout_threshold = now_timestamp.saturating_sub(self.worker_timeout_s);
 
+        // Phase 1: Read-only collection of workers to check
         let workers_to_check: Vec<(WorkerId, bool)> = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             inner
                 .workers
                 .iter()
@@ -864,7 +1056,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
             return Ok(());
         }
 
-        let mut inner = self.inner.lock().await;
+        // Phase 2: Write lock to remove timed out workers
+        let mut inner = self.inner.write().await;
         let mut result = Ok(());
 
         for worker_id in &worker_ids_to_remove {
@@ -891,7 +1084,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
     }
 
     async fn set_drain_worker(&self, worker_id: &WorkerId, is_draining: bool) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         inner.set_drain_worker(worker_id, is_draining).await?;
         self.worker_scheduler_metrics.record_worker_count(inner.workers.len());
         Ok(())

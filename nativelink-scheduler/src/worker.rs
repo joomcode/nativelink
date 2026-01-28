@@ -135,7 +135,7 @@ fn send_msg_to_worker(
 /// Reduces the platform properties available on the worker based on the platform properties provided.
 /// This is used because we allow more than 1 job to run on a worker at a time, and this is how the
 /// scheduler knows if more jobs can run on a given worker.
-fn reduce_platform_properties(
+pub fn reduce_platform_properties(
     parent_props: &mut PlatformProperties,
     reduction_props: &PlatformProperties,
 ) {
