@@ -395,6 +395,19 @@ pub struct SimpleSpec {
         deserialize_with = "convert_duration_with_shellexpand_and_negative"
     )]
     pub fallback_match_interval_s: i64,
+
+    /// Ignored. Batch worker matching was a fork feature that upstream's
+    /// matcher replaced; the key stays so existing configs still parse.
+    #[serde(default)]
+    pub enable_batch_worker_matching: bool,
+
+    /// Ignored. See `enable_batch_worker_matching`.
+    #[serde(default)]
+    pub batch_interval_ms: u64,
+
+    /// Ignored. See `enable_batch_worker_matching`.
+    #[serde(default)]
+    pub batch_debounce_ms: u64,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

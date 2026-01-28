@@ -31,9 +31,9 @@ use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::
 use nativelink_util::action_messages::{ActionInfo, ActionState, OperationId, WorkerId};
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::metrics::{
-    AgeBuckets, record_awaited_action_orphan, record_executing_ages, record_matching_pass,
-    record_parked_dispatched, record_queue_ages, record_queue_depth, record_sweep_failure,
-    record_unsatisfiable_failed, record_unsatisfiable_queued,
+    AgeBuckets, EXECUTION_METRICS, record_awaited_action_orphan, record_executing_ages,
+    record_matching_pass, record_parked_dispatched, record_queue_ages, record_queue_depth,
+    record_sweep_failure, record_unsatisfiable_failed, record_unsatisfiable_queued,
 };
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, MatchingEngineStateManager,
@@ -486,7 +486,11 @@ impl SimpleScheduler {
     async fn do_try_match(&self, full_worker_logging: bool) -> Result<(), Error> {
         let match_started = Instant::now();
         let result = self.do_try_match_inner(full_worker_logging).await;
-        record_matching_pass(match_started.elapsed().as_secs_f64(), result.is_ok());
+        let elapsed_s = match_started.elapsed().as_secs_f64();
+        record_matching_pass(elapsed_s, result.is_ok());
+        EXECUTION_METRICS
+            .do_try_match_duration
+            .record(elapsed_s, &[]);
         result
     }
 
