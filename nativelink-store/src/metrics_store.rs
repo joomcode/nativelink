@@ -150,8 +150,8 @@ impl StoreDriver for MetricsStore {
         result
     }
 
-    fn inner_store(&self, _digest: Option<StoreKey>) -> &'_ dyn StoreDriver {
-        self
+    fn inner_store(&self, digest: Option<StoreKey>) -> &'_ dyn StoreDriver {
+        self.inner.inner_store(digest)
     }
 
     fn as_any<'a>(&'a self) -> &'a (dyn core::any::Any + Sync + Send + 'static) {
