@@ -150,8 +150,8 @@ impl StoreDriver for MetricsStore {
         result
     }
 
-    fn inner_store(&self, _digest: Option<StoreKey>) -> &'_ dyn StoreDriver {
-        self
+    fn inner_store(&self, digest: Option<StoreKey>) -> &'_ dyn StoreDriver {
+        self.inner.inner_store(digest)
     }
 
     async fn post_init(self: Arc<Self>) -> Result<(), Error> {
