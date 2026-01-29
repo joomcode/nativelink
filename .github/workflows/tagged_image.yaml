@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [nativelink-worker-init]
+        image: [image, nativelink-worker-init]
     runs-on: ubuntu-24.04
     permissions:
       packages: write
