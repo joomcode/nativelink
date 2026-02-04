@@ -37,7 +37,7 @@ use nativelink_util::store_trait::{
 };
 use nativelink_util::task::JoinHandleDropGuard;
 use tokio::sync::Notify;
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 
 use crate::awaited_action_db::{
     AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CLIENT_KEEPALIVE_DURATION,

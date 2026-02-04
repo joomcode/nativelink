@@ -29,7 +29,7 @@ use std::fs::Permissions;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
 use bytes::{Bytes, BytesMut};
@@ -67,7 +67,7 @@ use nativelink_util::digest_hasher::{DigestHasher, DigestHasherFunc};
 use nativelink_util::metrics::RUNNING_ACTIONS_METRICS;
 use nativelink_util::store_trait::{Store, StoreLike, UploadSizeInfo};
 use nativelink_util::{background_spawn, spawn, spawn_blocking};
-use opentelemetry::{InstrumentationScope, KeyValue, global, metrics};
+use opentelemetry::{KeyValue, metrics};
 use parking_lot::Mutex;
 use prost::Message;
 use relative_path::RelativePath;
@@ -1347,7 +1347,7 @@ impl RunningActionImpl {
             );
         }
 
-        let stdout_digest_fut = self.metrics().upload_stdout.wrap(async {
+        let stdout_digest_fut = self.metrics().wrap_upload_stdout(async {
             let start = std::time::Instant::now();
             let data = execution_result.stdout;
             let data_len = data.len();
@@ -1364,7 +1364,7 @@ impl RunningActionImpl {
             );
             Result::<DigestInfo, Error>::Ok(digest)
         });
-        let stderr_digest_fut = self.metrics().upload_stderr.wrap(async {
+        let stderr_digest_fut = self.metrics().wrap_upload_stderr(async {
             let start = std::time::Instant::now();
             let data = execution_result.stderr;
             let data_len = data.len();
@@ -1530,8 +1530,7 @@ impl RunningAction for RunningActionImpl {
         );
         let metrics = self.metrics().clone();
         let upload_fut = metrics
-            .upload_results
-            .wrap(Self::inner_upload_results(self));
+            .wrap_upload_results(Self::inner_upload_results(self));
 
         let stall_warn_fut = async {
             let mut elapsed_secs = 0u64;

@@ -1,10 +1,7 @@
-use crate::callback_utils::RemoveItemCallbackHolder;
 use crate::filesystem_store::FilesystemStore;
-use crate::memory_store::MemoryStore;
 use async_trait::async_trait;
 use nativelink_error::Error;
 use nativelink_metric::MetricsComponent;
-use nativelink_proto::build_event_stream::File;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
 use nativelink_util::metrics::{StoreMetricAttrs, StoreType, STORE_METRICS};

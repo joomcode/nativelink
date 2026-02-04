@@ -16,7 +16,6 @@ use core::cmp;
 use core::ops::Bound;
 use core::time::Duration;
 use std::collections::HashMap;
-use std::iter::Map;
 use std::sync::Arc;
 
 pub use awaited_action::{AwaitedAction, AwaitedActionSortKey};

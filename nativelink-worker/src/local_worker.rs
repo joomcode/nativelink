@@ -22,45 +22,11 @@ use std::collections::HashMap;
 use std::env;
 use std::process::Stdio;
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, StreamExt, TryFutureExt, select};
-use nativelink_config::cas_server::{EnvironmentSource, LocalWorkerConfig};
-use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
-use nativelink_metric::{MetricsComponent, RootMetricsComponent};
-use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::update_for_worker::Update;
-use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::worker_api_client::WorkerApiClient;
-use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::{
-    execute_result, ExecuteComplete, ExecuteResult, GoingAwayRequest, KeepAliveRequest,
-    UpdateForWorker,
-};
-use nativelink_store::fast_slow_store::FastSlowStore;
-use nativelink_util::action_messages::{ActionResult, ActionStage, OperationId};
-use nativelink_util::common::fs;
-use nativelink_util::digest_hasher::DigestHasherFunc;
-use nativelink_util::metrics_utils::{AsyncCounterWrapper, CounterWithTime};
-use nativelink_util::shutdown_guard::ShutdownGuard;
-use nativelink_util::store_trait::Store;
-use nativelink_util::{spawn, tls_utils};
-use opentelemetry::context::Context;
-use tokio::process;
-use tokio::sync::{broadcast, mpsc};
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::time::sleep;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tonic::Streaming;
-use tracing::{Level, debug, error, event, info, info_span, instrument, trace, warn};
-
-use crate::running_actions_manager::{
-    ExecutionConfiguration, Metrics as RunningActionManagerMetrics, RunningAction,
-    RunningActionsManager, RunningActionsManagerArgs, RunningActionsManagerImpl,
-};
-use crate::worker_api_client_wrapper::{WorkerApiClientTrait, WorkerApiClientWrapper};
-use crate::worker_utils::make_connect_worker_request;
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
-use futures::{Future, FutureExt, StreamExt, TryFutureExt, select};
-use nativelink_config::cas_server::{ExecutionCompletionBehaviour, LocalWorkerConfig};
+use nativelink_config::cas_server::{EnvironmentSource, ExecutionCompletionBehaviour, LocalWorkerConfig};
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::update_for_worker::Update;
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::worker_api_client::WorkerApiClient;
@@ -72,19 +38,24 @@ use nativelink_store::fast_slow_store::FastSlowStore;
 use nativelink_util::action_messages::{ActionResult, ActionStage, OperationId};
 use nativelink_util::common::fs;
 use nativelink_util::digest_hasher::DigestHasherFunc;
-use nativelink_util::metrics::{LOCAL_WORKER_METRICS, WorkerMetricAttrs};
 use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::Store;
 use nativelink_util::{spawn, tls_utils};
 use opentelemetry::context::Context;
-use opentelemetry::{InstrumentationScope, KeyValue, global, metrics};
 use tokio::process;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::Streaming;
-use tracing::{Level, debug, error, event, info, info_span, instrument, warn};
+use tracing::{Level, debug, error, event, info, info_span, instrument, trace, warn};
+use nativelink_util::metrics::{WorkerMetricAttrs, LOCAL_WORKER_METRICS};
+use crate::running_actions_manager::{
+    ExecutionConfiguration, Metrics as RunningActionManagerMetrics, RunningAction,
+    RunningActionsManager, RunningActionsManagerArgs, RunningActionsManagerImpl,
+};
+use crate::worker_api_client_wrapper::{WorkerApiClientTrait, WorkerApiClientWrapper};
+use crate::worker_utils::make_connect_worker_request;
 
 /// Amount of time to wait if we have actions in transit before we try to
 /// consider an error to have occurred.
@@ -339,7 +310,7 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
                                     operation_id: operation_id.clone(),
                                 };
                                 self.metrics.clone().wrap(move |metrics| async move {
-                                    metrics.preconditions.wrap(preconditions_met(precondition_script_cfg, &extra_envs))
+                                    metrics.wrap_preconditions(preconditions_met(precondition_script_cfg, &extra_envs))
                                     .and_then(|()| running_actions_manager.create_and_add_action(worker_id, start_execute))
                                     .map(move |r| {
                                         // Now that we either failed or registered our action, we can

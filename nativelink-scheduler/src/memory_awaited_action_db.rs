@@ -16,10 +16,9 @@ use core::ops::{Bound, RangeBounds};
 use core::time::Duration;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::iter::Map;
 use std::sync::Arc;
 
-use async_lock::{Mutex, RwLock};
+use async_lock::RwLock;
 use futures::{FutureExt, Stream};
 use nativelink_config::stores::EvictionPolicy;
 use nativelink_error::{Code, Error, ResultExt, error_if, make_err};

@@ -30,7 +30,7 @@ use nativelink_util::spawn;
 use nativelink_util::task::JoinHandleDropGuard;
 use nativelink_worker::local_worker::LocalWorker;
 use nativelink_worker::worker_api_client_wrapper::WorkerApiClientTrait;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tonic::Status;
 use tonic::{
     Response,

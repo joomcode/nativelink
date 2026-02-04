@@ -43,13 +43,12 @@ use tokio::time::Duration;
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::api_worker_scheduler::ApiWorkerScheduler;
-use crate::awaited_action_db::{AwaitedAction, AwaitedActionDb, CLIENT_KEEPALIVE_DURATION};
+use crate::awaited_action_db::{AwaitedActionDb, CLIENT_KEEPALIVE_DURATION};
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::simple_scheduler_state_manager::{SchedulerStateManager, SimpleSchedulerStateManager};
 use crate::worker::{ActionInfoWithProps, ActionsState, Worker, WorkerState, WorkerTimestamp};
 use crate::worker_registry::WorkerRegistry;
 use crate::worker_scheduler::WorkerScheduler;
-use nativelink_util::metrics::StoreType::Metrics;
 use serde::Serialize;
 use nativelink_util::metrics::EXECUTION_METRICS;
 

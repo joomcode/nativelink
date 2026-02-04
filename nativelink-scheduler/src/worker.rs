@@ -27,7 +27,6 @@ use nativelink_util::metrics_utils::{AsyncCounterWrapper, CounterWithTime, FuncC
 use nativelink_util::platform_properties::{PlatformProperties, PlatformPropertyValue};
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
-use crate::awaited_action_db::AwaitedAction;
 
 pub type WorkerTimestamp = u64;
 
@@ -61,7 +60,7 @@ pub struct PendingActionInfoData {
     pub action_info: ActionInfoWithProps,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct WorkerState {
     pub id: WorkerId,
     pub platform_properties: PlatformProperties,
@@ -71,7 +70,7 @@ pub struct WorkerState {
     pub is_draining: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ActionsState {
     pub executing: usize,
     pub queued: usize,

@@ -126,6 +126,7 @@ rust_test_suite(
         "//nativelink-error",
         "//nativelink-metric",
         "//nativelink-proto",
+        "//nativelink-worker",
         "@crates//:axum",
         "@crates//:bytes",
         "@crates//:futures",

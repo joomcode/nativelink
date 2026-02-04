@@ -18,7 +18,7 @@ use core::ops::Range;
 use core::pin::Pin;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use futures::{FutureExt, join};
@@ -34,7 +34,6 @@ use nativelink_util::store_trait::{
     RemoveItemCallback, Store, StoreDriver, StoreKey, StoreLike, StoreOptimizations,
     UploadSizeInfo, slow_update_store_with_file,
 };
-use opentelemetry::{InstrumentationScope, global, metrics};
 use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};

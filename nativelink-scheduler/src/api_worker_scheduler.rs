@@ -15,7 +15,7 @@
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
@@ -397,7 +397,7 @@ impl ApiWorkerSchedulerImpl {
         for (idx, platform_properties) in actions.iter().enumerate() {
             let candidates = self
                 .capability_index
-                .find_matching_workers(platform_properties);
+                .find_matching_workers(platform_properties, full_worker_logging);
             if candidates.is_empty() {
                 continue;
             }
