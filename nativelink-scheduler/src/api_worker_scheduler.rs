@@ -385,7 +385,7 @@ impl ApiWorkerSchedulerImpl {
         for (idx, platform_properties) in actions.iter().enumerate() {
             let candidates = self
                 .capability_index
-                .find_matching_workers(platform_properties);
+                .find_matching_workers(platform_properties, full_worker_logging);
             if candidates.is_empty() {
                 continue;
             }
