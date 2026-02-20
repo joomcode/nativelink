@@ -1092,7 +1092,7 @@ where
                         warn!(state = ?awaited_action.state(), "Action already assigned");
                         return Err(make_err!(Code::Aborted, "Action already assigned"));
                     }
-                    stage.clone()
+                    (stage.clone(), false)
                 }
                 UpdateOperationType::UpdateWithError(err) => {
                     // Don't count a backpressure failure as an attempt for an action.
