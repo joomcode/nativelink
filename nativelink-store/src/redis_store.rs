@@ -2197,7 +2197,12 @@ where
     where
         K: SchedulerIndexProvider + Send,
     {
-        Err(make_err!(Code::Unimplemented, "Not implemented"))
+        let mut counts = Vec::with_capacity(index.len());
+        for key in index {
+            let count = self.count_by_index_prefix(key).await?;
+            counts.push(usize::try_from(count).unwrap_or(usize::MAX));
+        }
+        Ok(counts)
     }
 
     fn subscription_manager(
