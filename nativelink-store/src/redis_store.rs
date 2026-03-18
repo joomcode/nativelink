@@ -65,6 +65,7 @@ use uuid::Uuid;
 use crate::cas_utils::is_zero_digest;
 use crate::redis_utils::{
     FtAggregateCursor, FtAggregateOptions, FtCreateOptions, SearchSchema, ft_aggregate, ft_create,
+    ft_search_count,
 };
 
 /// The default size of the read chunk when reading data from Redis.
@@ -914,18 +915,18 @@ where
                     match connection_manager
                         .setrange::<_, _, usize>(temp_key_ref, offset, chunk.to_vec())
                         .await {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(err)
-                            if err.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly) =>
-                        {
-                            let (mut connection_manager, _connect_id) = self.connection_manager.reconnect(connect_id).await?;
-                            connection_manager
-                                .setrange::<_, _, usize>(temp_key_ref, offset, chunk.to_vec())
-                                .await
-                                .err_tip(
-                                    || format!("(after reconnect) while appending to temp key ({temp_key_ref}) in RedisStore::update. offset = {offset}. end_pos = {end_pos}"),
-                                )?;
-                        }
+                        if err.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly) =>
+                            {
+                                let (mut connection_manager, _connect_id) = self.connection_manager.reconnect(connect_id).await?;
+                                connection_manager
+                                    .setrange::<_, _, usize>(temp_key_ref, offset, chunk.to_vec())
+                                    .await
+                                    .err_tip(
+                                        || format!("(after reconnect) while appending to temp key ({temp_key_ref}) in RedisStore::update. offset = {offset}. end_pos = {end_pos}"),
+                                    )?;
+                            }
                         Err(err) => {
                             let mut error: Error = err.into();
                             error
@@ -1285,7 +1286,9 @@ macro_rules! get_index_name {
 
 /// Try to sanitize a string to be used as a Redis key.
 /// We don't actually modify the string, just check if it's valid.
-const fn try_sanitize(s: &str) -> bool {
+/// Try to sanitize a string to be used as a Redis key.
+/// We don't actually modify the string, just check if it's valid.
+const fn try_sanitize(s: &str) -> Option<&str> {
     // Note: We cannot use for loops or iterators here because they are not const.
     // Allowing us to use a const function here gives the compiler the ability to
     // optimize this function away entirely in the case where the input is constant.
@@ -1298,11 +1301,11 @@ const fn try_sanitize(s: &str) -> bool {
         }
         let c = chars[i];
         if !c.is_ascii_alphanumeric() && c != b'_' {
-            return false;
+            return None;
         }
         i += 1;
     }
-    true
+    Some(s)
 }
 
 /// An individual subscription to a key in Redis.
@@ -1548,13 +1551,6 @@ where
 {
     type SubscriptionManager = RedisSubscriptionManager;
 
-    async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
-    where
-        K: SchedulerIndexProvider + Send,
-    {
-        Err(make_err!(Code::Unimplemented, "Not implemented"))
-    }
-
     async fn subscription_manager(&self) -> Result<Arc<RedisSubscriptionManager>, Error> {
         self.subscription_manager
             .get_or_try_init(|| async move {
@@ -1612,9 +1608,9 @@ where
                 {
                     client.reconnect(&self.connection_manager).await?;
                     script_invocation
-                        .invoke_async(&mut client.connection_manager)
-                        .await
-                        .err_tip(|| format!("(after reconnect) In RedisStore::update_data::versioned for {key:?}"))?
+                            .invoke_async(&mut client.connection_manager)
+                            .await
+                            .err_tip(|| format!("(after reconnect) In RedisStore::update_data::versioned for {key:?}"))?
                 }
                 Err(err) => {
                     let mut error: Error = err.into();
@@ -1699,17 +1695,17 @@ where
                 {
                     client.reconnect(&self.connection_manager).await?;
                     client
-                        .connection_manager
-                        .hset_multiple::<_, _, _, ()>(redis_key.as_ref(), &fields)
-                        .await
-                        .err_tip(|| format!("(after reconnect) In RedisStore::update_data::noversion (hset) for {redis_key}"))?;
+                            .connection_manager
+                            .hset_multiple::<_, _, _, ()>(redis_key.as_ref(), &fields)
+                            .await
+                            .err_tip(|| format!("(after reconnect) In RedisStore::update_data::noversion (hset) for {redis_key}"))?;
                     if let Some(expiry_v) = expiry {
                         let seconds =
                             TryInto::<i64>::try_into(expiry_v.as_secs()).err_tip(|| {
                                 format!("Expiry seconds doesn't map to i64: {expiry_v:#?}")
                             })?;
                         let expiry_result: u8 = client.connection_manager.expire(redis_key.as_ref(), seconds).await
-                        .err_tip(|| format!("(after reconnect) In RedisStore::update_data::noversion (expiry) for {redis_key}"))?;
+                                .err_tip(|| format!("(after reconnect) In RedisStore::update_data::noversion (expiry) for {redis_key}"))?;
                         if expiry_result != 1 {
                             warn!(%redis_key, seconds, "Wasn't able to set expiry for Redis key");
                         }
@@ -1734,6 +1730,86 @@ where
         }
     }
 
+    async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send,
+    {
+        if index.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index_name = format!(
+            "{}",
+            get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY)
+        );
+        let mut counts = Vec::with_capacity(index.len());
+        for idx in index {
+            let index_value = idx.index_value();
+            let sanitized_field = try_sanitize(index_value.as_ref()).err_tip(|| {
+                format!("In RedisStore::count_by_index::try_sanitize - {index_value:?}")
+            })?;
+            let query = if sanitized_field.is_empty() {
+                "*".to_string()
+            } else {
+                format!("@{}:{{ {} }}", K::INDEX_NAME, sanitized_field)
+            };
+            let run_ft_search = || {
+                Ok::<_, Error>(async {
+                    let mut client = self.get_client().await?;
+                    ft_search_count(
+                        &mut client.connection_manager,
+                        index_name.as_str(),
+                        query.as_str(),
+                    )
+                    .await
+                })
+            };
+            let count = run_ft_search()?
+                .or_else(|_| async {
+                    let mut schema = vec![SearchSchema {
+                        field_name: K::INDEX_NAME.into(),
+                        sortable: false,
+                    }];
+                    if let Some(sort_key) = K::MAYBE_SORT_KEY {
+                        schema.push(SearchSchema {
+                            field_name: sort_key.into(),
+                            sortable: true,
+                        });
+                    }
+                    let create_result = ft_create(
+                        self.connection_manager.get_connection().await?.0,
+                        format!(
+                            "{}",
+                            get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY)
+                        ),
+                        FtCreateOptions {
+                            prefixes: vec![K::KEY_PREFIX.into()],
+                            nohl: true,
+                            nofields: true,
+                            nofreqs: true,
+                            nooffsets: true,
+                            temporary: Some(INDEX_TTL_S),
+                        },
+                        schema,
+                    )
+                        .await
+                        .err_tip(|| {
+                            format!(
+                                "Error with ft_create in RedisStore::count_by_index({index_name})",
+                            )
+                        });
+                    let count_result = run_ft_search()?.await.err_tip(|| {
+                        format!(
+                            "Error with second FT.SEARCH count in RedisStore::count_by_index({index_name})",
+                        )
+                    });
+                    count_result.or_else(|e| create_result.merge(Err(e)))
+                })
+                .await?;
+            counts.push(count);
+        }
+        Ok(counts)
+    }
+
     async fn search_by_index_prefix<K>(
         &self,
         index: K,
@@ -1745,11 +1821,9 @@ where
         K: SchedulerIndexProvider + SchedulerStoreDecodeTo + Send,
     {
         let index_value = index.index_value();
-        try_sanitize(index_value.as_ref())
-            .then_some(())
-            .err_tip(|| {
-                format!("In RedisStore::search_by_index_prefix::try_sanitize - {index_value:?}")
-            })?;
+        try_sanitize(index_value.as_ref()).err_tip(|| {
+            format!("In RedisStore::search_by_index_prefix::try_sanitize - {index_value:?}")
+        })?;
         let run_ft_aggregate = |connection_manager: C| async {
             ft_aggregate(
                 connection_manager,
@@ -1807,11 +1881,11 @@ where
                 let (connection_manager, _connect_id) =
                     self.connection_manager.reconnect(connect_id).await?;
                 run_ft_aggregate(connection_manager).await.err_tip(|| {
-                    format!(
-                        "Error with reconnected ft_aggregate in RedisStore::search_by_index_prefix({})",
-                        get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY),
-                    )
-                })
+                        format!(
+                            "Error with reconnected ft_aggregate in RedisStore::search_by_index_prefix({})",
+                            get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY),
+                        )
+                    })
             }
             Err(_) => {
                 let (connection_manager, result) =
