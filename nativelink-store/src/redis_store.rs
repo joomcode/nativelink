@@ -65,6 +65,7 @@ use uuid::Uuid;
 use crate::cas_utils::is_zero_digest;
 use crate::redis_utils::{
     FtAggregateCursor, FtAggregateOptions, FtCreateOptions, SearchSchema, ft_aggregate, ft_create,
+    ft_search_count,
 };
 
 /// The default size of the read chunk when reading data from Redis.
@@ -1632,7 +1633,80 @@ where
     where
         K: SchedulerIndexProvider + Send,
     {
-        Err(make_err!(Code::Unimplemented, "Not implemented"))
+        if index.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index_name = format!(
+            "{}",
+            get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY)
+        );
+        let mut counts = Vec::with_capacity(index.len());
+        for idx in index {
+            let index_value = idx.index_value();
+            let sanitized_field = try_sanitize(index_value.as_ref()).err_tip(|| {
+                format!("In RedisStore::count_by_index::try_sanitize - {index_value:?}")
+            })?;
+            let query = if sanitized_field.is_empty() {
+                "*".to_string()
+            } else {
+                format!("@{}:{{ {} }}", K::INDEX_NAME, sanitized_field)
+            };
+            let run_ft_search = || {
+                Ok::<_, Error>(async {
+                    let mut client = self.get_client().await?;
+                    ft_search_count(
+                        &mut client.connection_manager,
+                        index_name.as_str(),
+                        query.as_str(),
+                    )
+                    .await
+                })
+            };
+            let count = run_ft_search()?
+                .or_else(|_| async {
+                    let mut schema = vec![SearchSchema {
+                        field_name: K::INDEX_NAME.into(),
+                        sortable: false,
+                    }];
+                    if let Some(sort_key) = K::MAYBE_SORT_KEY {
+                        schema.push(SearchSchema {
+                            field_name: sort_key.into(),
+                            sortable: true,
+                        });
+                    }
+                    let create_result = ft_create(
+                        self.connection_manager.get_connection().await?.0,
+                        format!(
+                            "{}",
+                            get_index_name!(K::KEY_PREFIX, K::INDEX_NAME, K::MAYBE_SORT_KEY)
+                        ),
+                        FtCreateOptions {
+                            prefixes: vec![K::KEY_PREFIX.into()],
+                            nohl: true,
+                            nofields: true,
+                            nofreqs: true,
+                            nooffsets: true,
+                            temporary: Some(INDEX_TTL_S),
+                        },
+                        schema,
+                    )
+                    .await
+                    .err_tip(|| {
+                        format!(
+                            "Error with ft_create in RedisStore::count_by_index({index_name})",
+                        )
+                    });
+                    let count_result = run_ft_search()?.await.err_tip(|| {
+                        format!(
+                            "Error with second FT.SEARCH count in RedisStore::count_by_index({index_name})",
+                        )
+                    });
+                    count_result.or_else(|e| create_result.merge(Err(e)))
+                })
+                .await?;
+            counts.push(count);
+        }
+        Ok(counts)
     }
 
     async fn search_by_index_prefix<K>(
