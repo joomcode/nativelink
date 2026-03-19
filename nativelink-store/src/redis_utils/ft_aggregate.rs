@@ -23,6 +23,13 @@ use tracing::error;
 use crate::redis_utils::aggregate_types::RedisCursorData;
 use crate::redis_utils::ft_cursor_read::ft_cursor_read;
 
+/// Maximum rows `FT.AGGREGATE` may return in total (across all cursor reads).
+///
+/// RediSearch applies an implicit **`LIMIT 0 10`** when `LIMIT` is omitted, which capped
+/// [`crate::redis_store::RedisStore::search_by_index_prefix`] (and thus scheduler
+/// `get_queued_actions`) at 10 documents regardless of `WITHCURSOR` batch size.
+const FT_AGGREGATE_MAX_TOTAL_RESULTS: i64 = 2147483648;
+
 #[derive(Debug)]
 pub(crate) struct FtAggregateCursor {
     pub count: u64,
@@ -60,6 +67,10 @@ where
         .arg("LOAD")
         .arg(options.load.len())
         .arg(&options.load)
+        // Override RediSearch default LIMIT 0 10 (see `FT_AGGREGATE_MAX_TOTAL_RESULTS`).
+        .arg("LIMIT")
+        .arg(0_i64)
+        .arg(FT_AGGREGATE_MAX_TOTAL_RESULTS)
         .arg("WITHCURSOR")
         .arg("COUNT")
         .arg(options.cursor.count)
