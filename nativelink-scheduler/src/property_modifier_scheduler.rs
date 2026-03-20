@@ -22,12 +22,11 @@ use nativelink_config::schedulers::{
 use nativelink_error::{Error, ResultExt};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
 use nativelink_util::action_messages::{ActionInfo, OperationId};
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter,
 };
 use parking_lot::Mutex;
-
-use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 
 #[derive(MetricsComponent)]
 pub struct PropertyModifierScheduler {
@@ -177,6 +176,10 @@ impl ClientStateManager for PropertyModifierScheduler {
 
     fn as_any(&self) -> &dyn core::any::Any {
         self
+    }
+
+    fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
+        Some(self)
     }
 }
 

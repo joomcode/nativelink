@@ -672,6 +672,10 @@ impl ClientStateManager for HistoricalResourceScheduler {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
+        Some(self)
+    }
 }
 
 impl MetricsComponent for HistoricalResourceScheduler {

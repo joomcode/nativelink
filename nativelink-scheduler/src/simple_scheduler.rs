@@ -1619,6 +1619,10 @@ impl ClientStateManager for SimpleScheduler {
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
+
+    fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
+        Some(self)
+    }
 }
 
 #[async_trait]

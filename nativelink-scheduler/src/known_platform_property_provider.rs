@@ -12,17 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-use nativelink_error::Error;
-use nativelink_metric::RootMetricsComponent;
-use nativelink_util::operation_state_manager::ClientStateManager;
-
-/// `KnownPlatformPropertyProvider` interface is responsible for retrieving
-/// a list of known platform properties.
-#[async_trait]
-pub trait KnownPlatformPropertyProvider:
-    ClientStateManager + Sync + Send + Unpin + RootMetricsComponent + 'static
-{
-    // Returns the platform property manager.
-    async fn get_known_properties(&self, instance_name: &str) -> Result<Vec<String>, Error>;
-}
+// The trait lives in nativelink-util so `ClientStateManager` can hand one out.
+pub use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
