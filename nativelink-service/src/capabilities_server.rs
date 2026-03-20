@@ -28,8 +28,8 @@ use nativelink_proto::build::bazel::remote::execution::v2::{
     GetCapabilitiesRequest, PriorityCapabilities, ServerCapabilities,
 };
 use nativelink_proto::build::bazel::semver::SemVer;
-use nativelink_scheduler::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::digest_hasher::default_digest_hasher_func;
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use tonic::{Request, Response, Status};
 use tracing::{Level, instrument};
 
