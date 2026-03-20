@@ -1101,7 +1101,7 @@ impl SchedulerStore for ExperimentalMongoStore {
 
     async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
     where
-        K: SchedulerIndexProvider + Send
+        K: SchedulerIndexProvider + Send,
     {
         Ok(vec![0; index.len()])
     }

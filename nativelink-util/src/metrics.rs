@@ -14,11 +14,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Display, Formatter};
+use core::fmt::{Display, Formatter};
 use std::sync::{LazyLock, OnceLock};
 
+use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
+
 use crate::action_messages::ActionStage;
-use opentelemetry::{global, metrics, InstrumentationScope, KeyValue, Value};
 
 /// Callback type for observable gauges that report queued action counts.
 /// The callback receives an `Observer` that should be used to record values with attributes.
@@ -700,16 +701,13 @@ pub struct ExecutionMetrics {
     pub execution_actions_count: metrics::Gauge<u64>,
     // Gauge of queued actions by platform properties
     pub execution_queued_actions_count: metrics::ObservableGauge<u64>,
-    /// Duration of do_try_match in ms
+    /// Duration of `do_try_match` in ms
     pub do_try_match_duration: metrics::Histogram<f64>,
 }
 
 /// Helper function to create attributes for execution metrics
 #[must_use]
-pub fn make_execution_attributes(
-    instance_name: &str,
-    priority: Option<i32>,
-) -> Vec<KeyValue> {
+pub fn make_execution_attributes(instance_name: &str, priority: Option<i32>) -> Vec<KeyValue> {
     let mut attrs = vec![KeyValue::new(EXECUTION_INSTANCE, instance_name.to_string())];
 
     if let Some(priority) = priority {
@@ -1601,7 +1599,7 @@ pub enum StoreType {
 }
 
 impl Display for StoreType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             StoreType::Filesystem => write!(f, "filesystem"),
             StoreType::S3 => write!(f, "s3"),
@@ -1644,7 +1642,7 @@ pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
             // memory, a filesystem, or network storage. The current values were
             // determined empirically and might need adjustment.
             .with_boundaries(vec![
-                0.1,   // 100μs
+                0.1, // 100μs
                 // Sub-millisecond range
                 0.5, // 500μs
                 1.0, // 1ms
@@ -1654,9 +1652,9 @@ pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
                 50.0,  // 50ms
                 100.0, // 100ms
                 // Higher latency range
-                500.0,  // 500ms
-                1000.0, // 1 second
-                5000.0, // 5 seconds
+                500.0,   // 500ms
+                1000.0,  // 1 second
+                5000.0,  // 5 seconds
                 10000.0, // 10 seconds
             ])
             .build(),
@@ -1696,7 +1694,6 @@ pub struct StoreMetricAttrs {
     write_error: Vec<KeyValue>,
     eviction: Vec<KeyValue>,
     store_size: Vec<KeyValue>,
-
 }
 
 impl StoreMetricAttrs {
@@ -1727,7 +1724,6 @@ impl StoreMetricAttrs {
             write_error: make_attrs(CacheOperationName::Write, CacheOperationResult::Error),
             eviction: make_attrs(CacheOperationName::Evict, CacheOperationResult::Success),
             store_size: base_attrs.clone(),
-
         }
     }
 

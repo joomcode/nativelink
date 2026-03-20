@@ -1,17 +1,19 @@
-use crate::filesystem_store::FilesystemStore;
+use core::pin::Pin;
+use std::borrow::Cow;
+use std::sync::Arc;
+use std::time::Instant;
+
 use async_trait::async_trait;
 use nativelink_error::Error;
 use nativelink_metric::MetricsComponent;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
-use nativelink_util::metrics::{StoreMetricAttrs, StoreType, STORE_METRICS};
+use nativelink_util::metrics::{STORE_METRICS, StoreMetricAttrs, StoreType};
 use nativelink_util::store_trait::{
     RemoveItemCallback, Store, StoreDriver, StoreKey, StoreLike, UploadSizeInfo,
 };
-use std::borrow::Cow;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+
+use crate::filesystem_store::FilesystemStore;
 
 #[derive(MetricsComponent, Debug)]
 pub struct MetricsStore {
@@ -42,7 +44,9 @@ impl MetricsStore {
                 tracing::error!("Failed to register remove callback: {:?}", e);
             }
 
-            STORE_METRICS.store_size.record(fs_store.get_len(), &attrs.store_size());
+            STORE_METRICS
+                .store_size
+                .record(fs_store.get_len(), &attrs.store_size());
         }
 
         Arc::new(Self {
@@ -109,7 +113,9 @@ impl StoreDriver for MetricsStore {
         }
 
         if let Some(fs_store) = self.inner.downcast_ref::<FilesystemStore>(None) {
-            STORE_METRICS.store_size.record(fs_store.get_len(), &self.attrs.store_size());
+            STORE_METRICS
+                .store_size
+                .record(fs_store.get_len(), &self.attrs.store_size());
         }
 
         result

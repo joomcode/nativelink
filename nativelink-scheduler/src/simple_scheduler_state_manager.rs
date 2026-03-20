@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::awaited_action_db::{
-    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CountableActionStage,
-    SortedAwaitedActionState,
-};
-use async_lock::Mutex;
-use async_trait::async_trait;
 use core::ops::Bound;
 use core::time::Duration;
-use futures::{stream, StreamExt, TryStreamExt};
-use nativelink_error::{make_err, Code, Error, ResultExt};
+use std::collections::{BTreeMap, HashMap};
+use std::string::ToString;
+use std::sync::{Arc, Weak};
+use std::{env, vec};
+
+use async_lock::Mutex;
+use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt, stream};
+use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_metric::MetricsComponent;
 use nativelink_util::action_messages::{
     ActionInfo, ActionResult, ActionStage, ActionState, ActionUniqueQualifier, ExecutionMetadata,
@@ -30,8 +31,8 @@ use nativelink_util::action_messages::{
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::metrics::{
-    register_queued_actions_callback, ExecutionMetricAttrs, ExecutionResult, EXECUTION_INSTANCE,
-    EXECUTION_METRICS, EXECUTION_RESULT, EXECUTION_STAGE, ExecutionStage,
+    EXECUTION_INSTANCE, EXECUTION_METRICS, EXECUTION_RESULT, EXECUTION_STAGE, ExecutionMetricAttrs,
+    ExecutionResult, ExecutionStage, register_queued_actions_callback,
 };
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, MatchingEngineStateManager,
@@ -41,11 +42,11 @@ use nativelink_util::origin_event::OriginMetadata;
 use opentelemetry::KeyValue;
 use tracing::{debug, info, trace, warn};
 
+use super::awaited_action_db::{
+    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CountableActionStage,
+    SortedAwaitedActionState,
+};
 use crate::worker_registry::SharedWorkerRegistry;
-use std::collections::{BTreeMap, HashMap};
-use std::string::ToString;
-use std::sync::{Arc, Weak};
-use std::{env, vec};
 
 /// Maximum number of times an update to the database
 /// can fail before giving up.
@@ -164,7 +165,7 @@ impl SchedulerMetrics {
     }
 
     #[must_use]
-    pub fn result_from_stage(stage: &ActionStage) -> Option<ExecutionResult> {
+    pub const fn result_from_stage(stage: &ActionStage) -> Option<ExecutionResult> {
         match stage {
             ActionStage::Completed(result) => {
                 if result.error.is_some() {
@@ -572,7 +573,7 @@ where
 
     /// Returns a reference to the scheduler metrics for recording OTEL metrics.
     #[must_use]
-    pub fn metrics(&self) -> &SchedulerMetrics {
+    pub const fn metrics(&self) -> &SchedulerMetrics {
         &self.scheduler_metrics
     }
 
@@ -587,7 +588,7 @@ where
         action_insert_timestamp: std::time::SystemTime,
     ) {
         // Only record if the stage actually changed
-        if std::mem::discriminant(previous_stage) != std::mem::discriminant(new_stage) {
+        if core::mem::discriminant(previous_stage) != core::mem::discriminant(new_stage) {
             self.record_actions_count().await;
             // Record the stage transition
             self.scheduler_metrics
@@ -655,7 +656,7 @@ where
 
                         EXECUTION_METRICS
                             .execution_total_duration
-                            .record(total_execution_duration.as_secs_f64(), &[])
+                            .record(total_execution_duration.as_secs_f64(), &[]);
                     }
                 }
             }
@@ -1191,10 +1192,8 @@ where
             let priority = Some(awaited_action.action_info().priority);
 
             // Build base attributes for metrics
-            let mut attrs = nativelink_util::metrics::make_execution_attributes(
-                instance_name,
-                priority,
-            );
+            let mut attrs =
+                nativelink_util::metrics::make_execution_attributes(instance_name, priority);
 
             // Add stage attribute
             let execution_stage: ExecutionStage = (&action_state.stage).into();
@@ -1235,7 +1234,7 @@ where
                 is_retry,
                 action_insert_timestamp,
             )
-                .await;
+            .await;
 
             return Ok(());
         }
@@ -1274,7 +1273,7 @@ where
         if result.is_ok() {
             self.scheduler_metrics
                 .record_stage_transition(None, ActionStage::Queued);
-            self.record_actions_count().await
+            self.record_actions_count().await;
         }
 
         result
@@ -1508,7 +1507,7 @@ where
         None
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }

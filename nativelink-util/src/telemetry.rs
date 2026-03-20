@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::default::Default;
+use std::env;
+use std::sync::OnceLock;
+
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
-use core::default::Default;
 use ginepro::LoadBalancedChannel;
 use hyper::http::Response;
 use nativelink_error::{Code, ResultExt, make_err};
@@ -34,8 +37,6 @@ use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_semantic_conventions::attribute::ENDUSER_ID;
 use prost::Message;
-use std::env;
-use std::sync::OnceLock;
 use tracing::debug;
 use tracing::metadata::LevelFilter;
 use tracing_opentelemetry::{MetricsLayer, layer};
@@ -209,9 +210,11 @@ const NL_OTEL_ENDPOINT: &str = "NL_OTEL_ENDPOINT";
 async fn maybe_load_balanced_channel() -> Option<LoadBalancedChannel> {
     match env::var(NL_OTEL_ENDPOINT) {
         Ok(endpoint) => {
-            let url = Url::parse(endpoint.as_str()).map_err(|e| {
-                make_err!(Code::Internal, "Unable to parse endpoint {endpoint}: {e:?}")
-            }).unwrap();
+            let url = Url::parse(endpoint.as_str())
+                .map_err(|e| {
+                    make_err!(Code::Internal, "Unable to parse endpoint {endpoint}: {e:?}")
+                })
+                .unwrap();
 
             let host = url
                 .host()
