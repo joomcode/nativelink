@@ -24,15 +24,17 @@ use nativelink_proto::com::github::trace_machina::nativelink::events::OriginEven
 use nativelink_store::redis_store::{RedisStore, StandardRedisManager};
 use nativelink_store::store_manager::StoreManager;
 use nativelink_util::instant_wrapper::InstantWrapper;
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
+use nativelink_util::operation_state_manager::ClientStateManager;
 use redis::aio::ConnectionManager;
 use tokio::sync::{Notify, mpsc};
 
 use crate::cache_lookup_scheduler::CacheLookupScheduler;
 use crate::grpc_scheduler::GrpcScheduler;
 use crate::historical_resource_scheduler::HistoricalResourceScheduler;
-use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 use crate::memory_awaited_action_db::MemoryAwaitedActionDb;
 use crate::property_modifier_scheduler::PropertyModifierScheduler;
+use crate::property_router_scheduler::PropertyRouterScheduler;
 use crate::simple_scheduler::SimpleScheduler;
 use crate::store_awaited_action_db::StoreAwaitedActionDb;
 use crate::worker_scheduler::WorkerScheduler;
@@ -109,6 +111,39 @@ async fn inner_scheduler_factory(
                 action_scheduler.err_tip(|| "Nested scheduler is not an action scheduler")?,
             ));
             (Some(historical_resource_scheduler), worker_scheduler)
+        }
+        SchedulerSpec::PropertyRouter(spec) => {
+            use std::collections::HashMap;
+            let mut route_map: HashMap<String, Arc<dyn ClientStateManager>> =
+                HashMap::with_capacity(spec.routes.len());
+            for (value, nested_spec) in &spec.routes {
+                let (action_scheduler, _) = Box::pin(inner_scheduler_factory(
+                    nested_spec,
+                    store_manager,
+                    maybe_origin_event_tx,
+                ))
+                .await
+                .err_tip(|| format!("In nested PropertyRouterScheduler route '{value}'"))?;
+                route_map.insert(
+                    value.clone(),
+                    action_scheduler
+                        .err_tip(|| format!("Nested route '{value}' is not an action scheduler"))?,
+                );
+            }
+            let (default_action_scheduler, _) = Box::pin(inner_scheduler_factory(
+                &spec.default_scheduler,
+                store_manager,
+                maybe_origin_event_tx,
+            ))
+            .await
+            .err_tip(|| "In PropertyRouterScheduler default_scheduler")?;
+            let router = Arc::new(PropertyRouterScheduler::new(
+                &spec.property_name,
+                route_map,
+                default_action_scheduler
+                    .err_tip(|| "Default scheduler is not an action scheduler")?,
+            ));
+            (Some(router), None)
         }
     };
 

@@ -32,7 +32,6 @@ use nativelink_proto::google::longrunning::{
     WaitOperationRequest,
 };
 use nativelink_proto::google::rpc::{PreconditionFailure, Status as GrpcStatusProto};
-use nativelink_scheduler::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_scheduler::mock_scheduler::MockActionScheduler;
 use nativelink_service::execution_server::ExecutionServer;
 use nativelink_store::ac_utils::serialize_and_upload_message;
@@ -43,6 +42,7 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasherFunc;
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{ActionStateResult, ActionStateResultStream};
 use nativelink_util::origin_event::OriginMetadata;
 use nativelink_util::store_trait::StoreLike;

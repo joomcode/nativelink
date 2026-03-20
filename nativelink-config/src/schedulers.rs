@@ -33,6 +33,7 @@ pub enum SchedulerSpec {
     CacheLookup(CacheLookupSpec),
     PropertyModifier(PropertyModifierSpec),
     HistoricalResource(HistoricalResourceSpec),
+    PropertyRouter(PropertyRouterSpec),
 }
 
 /// When the scheduler matches tasks to workers that are capable of running
@@ -405,4 +406,21 @@ pub struct HistoricalResourceSpec {
 
     /// The nested scheduler to use after applying resource hints.
     pub scheduler: Box<SchedulerSpec>,
+}
+
+/// Routes actions to different schedulers based on a platform property value.
+/// Actions whose property value matches a key in `routes` go to that scheduler.
+/// All other actions (missing property or unmatched value) go to `default_scheduler`.
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "dev-schema", derive(JsonSchema))]
+pub struct PropertyRouterSpec {
+    /// The platform property key to match on (e.g. "container-image").
+    pub property_name: String,
+
+    /// Map of property value -> nested scheduler spec.
+    pub routes: HashMap<String, SchedulerSpec>,
+
+    /// Scheduler to use when the property is absent or its value does not match any route.
+    pub default_scheduler: Box<SchedulerSpec>,
 }
