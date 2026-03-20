@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -31,6 +30,7 @@ use nativelink_util::action_messages::{
 use nativelink_util::background_spawn;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasherFunc;
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter,
 };
@@ -46,8 +46,6 @@ use scopeguard::guard;
 use tokio::sync::oneshot;
 use tonic::{Request, Response};
 use tracing::error;
-
-use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 
 /// Actions that are having their cache checked or failed cache lookup and are
 /// being forwarded upstream.  Missing the `skip_cache_check` actions which are
@@ -381,7 +379,11 @@ impl ClientStateManager for CacheLookupScheduler {
         self.inner_filter_operations(filter).await
     }
 
-    fn as_any(&self) -> &dyn Any {
+    fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
+        self.action_scheduler.as_known_platform_property_provider()
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }
