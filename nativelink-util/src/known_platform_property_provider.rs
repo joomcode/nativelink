@@ -15,7 +15,8 @@
 use async_trait::async_trait;
 use nativelink_error::Error;
 use nativelink_metric::RootMetricsComponent;
-use nativelink_util::operation_state_manager::ClientStateManager;
+
+use crate::operation_state_manager::ClientStateManager;
 
 /// `KnownPlatformPropertyProvider` interface is responsible for retrieving
 /// a list of known platform properties.

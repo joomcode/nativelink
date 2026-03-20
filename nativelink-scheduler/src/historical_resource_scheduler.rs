@@ -26,6 +26,7 @@ use nativelink_metric::{
     MetricFieldData, MetricKind, MetricPublishKnownKindData, MetricsComponent, RootMetricsComponent,
 };
 use nativelink_util::action_messages::{ActionInfo, OperationId};
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter,
 };
@@ -35,8 +36,6 @@ use opentelemetry::context::Context;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use tracing::{debug, warn};
-
-use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct HintKey {
@@ -308,6 +307,10 @@ impl ClientStateManager for HistoricalResourceScheduler {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
+        Some(self)
     }
 }
 

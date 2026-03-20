@@ -39,7 +39,6 @@ use nativelink_proto::google::longrunning::{
 use nativelink_proto::google::rpc::{
     PreconditionFailure, Status as GrpcStatusProto, precondition_failure,
 };
-use nativelink_scheduler::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_store::ac_utils::get_and_decode_digest;
 use nativelink_store::store_manager::StoreManager;
 use nativelink_util::action_messages::{
@@ -48,6 +47,7 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::common::{self, DigestInfo};
 use nativelink_util::digest_hasher::{DigestHasherFunc, make_ctx_for_hash_func};
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{ActionStateResult, OperationFilter};
 use nativelink_util::store_trait::{Store, StoreLike};
 use opentelemetry::context::FutureExt;
