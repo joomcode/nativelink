@@ -26,6 +26,7 @@ use crate::action_messages::{
     ActionInfo, ActionStage, ActionState, ActionUniqueKey, OperationId, WorkerId,
 };
 use crate::common::DigestInfo;
+use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 use crate::origin_event::OriginMetadata;
 
 bitflags! {
@@ -114,6 +115,12 @@ pub trait ClientStateManager: Sync + Send + Unpin + MetricsComponent + 'static {
 
     /// Returns the implementation as `Any` so that it can be downcast to a concrete type.
     fn as_any(&self) -> &dyn core::any::Any;
+
+    /// Returns this state manager as a [`KnownPlatformPropertyProvider`] when it
+    /// implements one, otherwise `None`.
+    fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
+        None
+    }
 }
 
 /// The type of update to perform on an operation.

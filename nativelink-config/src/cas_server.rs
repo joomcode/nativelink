@@ -880,7 +880,7 @@ pub struct LocalWorkerConfig {
     /// Default: False.
     pub use_mount_namespace: Option<bool>,
 
-    #[serde(deserialize_with = "convert_enum_with_shellexpand")]
+    #[serde(default, deserialize_with = "convert_enum_with_shellexpand")]
     pub execution_completion_behaviour: ExecutionCompletionBehaviour,
 }
 
