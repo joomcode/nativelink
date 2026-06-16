@@ -272,6 +272,10 @@ impl ClientStateManager for FixedListing {
             .collect();
         Ok(Box::pin(stream::iter(listed)))
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 /// Between the filter and the read a record can be dispatched, expire or

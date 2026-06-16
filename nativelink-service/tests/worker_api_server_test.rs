@@ -199,6 +199,7 @@ async fn setup_api_server_with(
         60, // unacknowledged_kill_timeout_s
         dispatch_ack_timeout_s,
         worker_registry,
+        "test_scheduler",
         None,
         false,                   // has_peers
         Duration::from_secs(15), // record_ttl (unused while has_peers = false)

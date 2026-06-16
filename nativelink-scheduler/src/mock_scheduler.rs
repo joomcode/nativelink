@@ -199,6 +199,10 @@ impl ClientStateManager for MockActionScheduler {
             _ => panic!("Expected find_by_client_operation_id return value"),
         }
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 impl RootMetricsComponent for MockActionScheduler {}

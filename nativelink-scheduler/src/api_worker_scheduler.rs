@@ -41,10 +41,10 @@ use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::
 };
 use nativelink_util::action_messages::{ActionStage, ActionUniqueQualifier, OperationId, WorkerId};
 use nativelink_util::metrics::{
-    WorkerDisconnectReason, record_dispatch_requeue, record_execution_cpu_time,
-    record_execution_peak_memory, record_held_workers, record_worker_connected,
-    record_worker_disconnected, record_worker_hold, record_worker_keepalive,
-    record_worker_keepalive_gap, record_worker_state,
+    WORKER_POOL_INSTANCE, WORKER_POOL_METRICS, WorkerDisconnectReason, WorkerPoolMetricAttrs,
+    record_dispatch_requeue, record_execution_cpu_time, record_execution_peak_memory,
+    record_held_workers, record_worker_connected, record_worker_disconnected, record_worker_hold,
+    record_worker_keepalive, record_worker_keepalive_gap, record_worker_state,
 };
 use nativelink_util::operation_state_manager::{
     Decline, Escalation, UpdateOperationType, WorkerStateManager,
@@ -52,6 +52,7 @@ use nativelink_util::operation_state_manager::{
 use nativelink_util::origin_event::get_node_id;
 use nativelink_util::platform_properties::{PlatformProperties, PlatformPropertyValue};
 use nativelink_util::shutdown_guard::ShutdownGuard;
+use opentelemetry::KeyValue;
 use tokio::sync::{Notify, mpsc};
 use tonic::async_trait;
 use tracing::{debug, error, info, trace, warn};
@@ -144,10 +145,85 @@ use crate::match_outcome::{
     MatchOutcome, PropertyShape, UnsatisfiableReason, explain_unsatisfiable,
 };
 use crate::platform_property_manager::PlatformPropertyManager;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerTimestamp, WorkerUpdate};
+use crate::worker::{ActionInfoWithProps, Worker, WorkerState, WorkerTimestamp, WorkerUpdate};
 use crate::worker_capability_index::WorkerCapabilityIndex;
 use crate::worker_registry::SharedWorkerRegistry;
 use crate::worker_scheduler::{WorkerScheduler, WorkerSummary};
+
+#[derive(Debug)]
+pub struct WorkerSchedulerMetrics {
+    attrs: WorkerPoolMetricAttrs,
+    instance_name: String,
+}
+
+impl WorkerSchedulerMetrics {
+    #[must_use]
+    pub fn new(instance_name: impl Into<String>) -> Self {
+        let instance_name = instance_name.into();
+        let base_attrs = vec![KeyValue::new(WORKER_POOL_INSTANCE, instance_name.clone())];
+        Self {
+            attrs: WorkerPoolMetricAttrs::new(&base_attrs),
+            instance_name,
+        }
+    }
+
+    pub fn record_worker_count(&self, count: usize) {
+        WORKER_POOL_METRICS
+            .worker_count
+            .record(count as u64, self.attrs.added());
+    }
+
+    pub fn record_worker_added(&self) {
+        WORKER_POOL_METRICS.worker_events.add(1, self.attrs.added());
+    }
+
+    pub fn record_worker_removed(&self) {
+        WORKER_POOL_METRICS
+            .worker_events
+            .add(1, self.attrs.removed());
+    }
+
+    pub fn record_worker_timeout(&self) {
+        WORKER_POOL_METRICS
+            .worker_events
+            .add(1, self.attrs.timeout());
+    }
+
+    pub fn record_worker_connection_failed(&self) {
+        WORKER_POOL_METRICS
+            .worker_events
+            .add(1, self.attrs.connection_failed());
+    }
+
+    pub fn record_action_dispatched(&self) {
+        WORKER_POOL_METRICS
+            .worker_actions_dispatched
+            .add(1, self.attrs.added());
+    }
+
+    pub fn record_action_completed(&self) {
+        WORKER_POOL_METRICS
+            .worker_actions_completed
+            .add(1, self.attrs.removed());
+    }
+
+    pub fn record_running_actions_count(&self, count: usize) {
+        WORKER_POOL_METRICS
+            .worker_actions_running
+            .record(count as u64, self.attrs.added());
+    }
+
+    pub fn record_dispatch_failure(&self) {
+        WORKER_POOL_METRICS
+            .worker_dispatch_failures
+            .add(1, self.attrs.evicted());
+    }
+
+    #[must_use]
+    pub fn instance_name(&self) -> &str {
+        &self.instance_name
+    }
+}
 
 #[derive(Debug)]
 struct Workers(LruCache<WorkerId, Worker>);
@@ -2037,6 +2113,13 @@ impl ApiWorkerSchedulerImpl {
         self.capacity_changed();
         result
     }
+
+    fn count_running_actions(&self) -> usize {
+        self.workers
+            .iter()
+            .map(|(_, w)| w.running_action_infos.len())
+            .sum()
+    }
 }
 
 #[derive(Debug, MetricsComponent)]
@@ -2068,6 +2151,9 @@ pub struct ApiWorkerScheduler {
 
     /// Performance metrics for observability.
     metrics: Arc<SchedulerMetrics>,
+
+    /// OTEL metrics for tracking worker pool state.
+    worker_metrics: WorkerSchedulerMetrics,
 
     /// Channel for publishing origin events such as worker-observed action
     /// resource usage. `None` when origin events are disabled.
@@ -2105,6 +2191,7 @@ impl ApiWorkerScheduler {
         unacknowledged_kill_timeout_s: u64,
         dispatch_ack_timeout_s: u64,
         worker_registry: SharedWorkerRegistry,
+        instance_name: impl Into<String>,
         maybe_origin_event_tx: Option<mpsc::Sender<OriginEvent>>,
         has_peers: bool,
         record_ttl: Duration,
@@ -2156,6 +2243,7 @@ impl ApiWorkerScheduler {
             dispatch_ack_timeout_s,
             worker_registry,
             metrics: Arc::new(SchedulerMetrics::default()),
+            worker_metrics: WorkerSchedulerMetrics::new(instance_name),
             maybe_origin_event_tx,
             local_fleet_change_notify,
             capacity_generation,
@@ -2189,6 +2277,12 @@ impl ApiWorkerScheduler {
         &self.worker_registry
     }
 
+    /// Returns a reference to the worker scheduler metrics for recording OTEL metrics.
+    #[must_use]
+    pub const fn workerMetrics(&self) -> &WorkerSchedulerMetrics {
+        &self.worker_metrics
+    }
+
     /// `dispatched_at` is the scheduler's clock at the send; the
     /// acknowledgement timeout counts from it.
     pub async fn worker_notify_run_action(
@@ -2202,9 +2296,20 @@ impl ApiWorkerScheduler {
             .actions_dispatched
             .fetch_add(1, Ordering::Relaxed);
         let mut inner = self.inner.lock().await;
-        inner
+        let result = inner
             .worker_notify_run_action(worker_id, operation_id, action_info, dispatched_at)
-            .await
+            .await;
+
+        // Record metrics
+        if result.is_ok() {
+            self.worker_metrics.record_action_dispatched();
+        } else {
+            self.worker_metrics.record_dispatch_failure();
+        }
+        self.worker_metrics
+            .record_running_actions_count(inner.count_running_actions());
+
+        result
     }
 
     /// A keepalive, or another message standing in for one. Only a
@@ -2406,6 +2511,11 @@ impl ApiWorkerScheduler {
         })?;
         worker.keep_alive()
     }
+
+    pub async fn get_workers_state(&self) -> Vec<WorkerState> {
+        let inner = self.inner.lock().await;
+        inner.workers.iter().map(|(_, w)| w.to_state()).collect()
+    }
 }
 
 #[async_trait]
@@ -2542,6 +2652,7 @@ impl WorkerScheduler for ApiWorkerScheduler {
             .add_worker(worker)
             .err_tip(|| "Error while adding worker, removing from pool");
         if let Err(err) = result {
+            self.worker_metrics.record_worker_connection_failed();
             return Result::<(), _>::Err(err.clone()).merge(
                 inner
                     .immediate_evict_worker(&worker_id, err, false, WorkerDisconnectReason::Error)
@@ -2553,6 +2664,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
         self.worker_registry.register_worker(&worker_id, now).await;
 
         self.metrics.workers_added.fetch_add(1, Ordering::Relaxed);
+        self.worker_metrics.record_worker_added();
+        self.worker_metrics.record_worker_count(inner.workers.len());
         Ok(())
     }
 
@@ -2562,12 +2675,29 @@ impl WorkerScheduler for ApiWorkerScheduler {
         operation_id: &OperationId,
         update: UpdateOperationType,
     ) -> Result<(), Error> {
+        let is_completion = matches!(
+            update,
+            UpdateOperationType::UpdateWithActionStage(ref stage) if stage.is_finished()
+        ) || matches!(
+            update,
+            UpdateOperationType::UpdateWithError(_) | UpdateOperationType::UpdateWithDisconnect
+        );
+
         let mut inner = self.inner.lock().await;
         let (update, escalated) = inner.maybe_escalate(worker_id, operation_id, update);
         if escalated {
             record_dispatch_requeue("memory_escalation");
         }
-        inner.update_action(worker_id, operation_id, update).await
+        let result = inner.update_action(worker_id, operation_id, update).await;
+
+        // Record action completion metric
+        if result.is_ok() && is_completion {
+            self.worker_metrics.record_action_completed();
+        }
+        self.worker_metrics
+            .record_running_actions_count(inner.count_running_actions());
+
+        result
     }
 
     async fn worker_dispatch_accepted(
@@ -2635,28 +2765,38 @@ impl WorkerScheduler for ApiWorkerScheduler {
         self.worker_registry.remove_worker(worker_id).await;
 
         let mut inner = self.inner.lock().await;
-        inner
+        let result = inner
             .immediate_evict_worker(
                 worker_id,
                 make_err!(Code::Internal, "Received request to remove worker"),
                 false,
                 WorkerDisconnectReason::Removed,
             )
-            .await
+            .await;
+
+        // Record worker removal
+        self.worker_metrics.record_worker_removed();
+        self.worker_metrics.record_worker_count(inner.workers.len());
+        result
     }
 
     async fn worker_disconnected(&self, worker_id: &WorkerId) -> Result<(), Error> {
         self.worker_registry.remove_worker(worker_id).await;
 
         let mut inner = self.inner.lock().await;
-        inner
+        let result = inner
             .immediate_evict_worker(
                 worker_id,
                 make_err!(Code::Unavailable, "Worker stream ended without going away"),
                 true,
                 WorkerDisconnectReason::Disconnected,
             )
-            .await
+            .await;
+
+        // Record worker removal
+        self.worker_metrics.record_worker_removed();
+        self.worker_metrics.record_worker_count(inner.workers.len());
+        result
     }
 
     async fn shutdown(&self, shutdown_guard: ShutdownGuard) {
@@ -2775,7 +2915,12 @@ impl WorkerScheduler for ApiWorkerScheduler {
                     .immediate_evict_worker(worker_id, err, false, reason)
                     .await,
             );
+            self.worker_metrics.record_worker_timeout();
         }
+
+        self.worker_metrics
+            .record_running_actions_count(inner.count_running_actions());
+        self.worker_metrics.record_worker_count(inner.workers.len());
 
         result
     }
@@ -2818,7 +2963,9 @@ impl WorkerScheduler for ApiWorkerScheduler {
 
     async fn set_drain_worker(&self, worker_id: &WorkerId, is_draining: bool) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        inner.set_drain_worker(worker_id, is_draining)
+        inner.set_drain_worker(worker_id, is_draining)?;
+        self.worker_metrics.record_worker_count(inner.workers.len());
+        Ok(())
     }
 
     async fn kill_revoked_operations(&self) -> Result<(), Error> {

@@ -164,6 +164,10 @@ impl ClientStateManager for RecordingScheduler {
         });
         Ok(stream::once(async move { result }).boxed())
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 #[async_trait]

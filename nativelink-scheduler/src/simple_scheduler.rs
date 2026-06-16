@@ -49,6 +49,7 @@ use opentelemetry::baggage::BaggageExt;
 use opentelemetry::context::{Context, FutureExt as OtelFutureExt};
 use opentelemetry_semantic_conventions::attribute::ENDUSER_ID;
 use parking_lot::Mutex;
+use serde::Serialize;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Duration;
 use tracing::{debug, error, info, info_span, warn};
@@ -60,10 +61,10 @@ use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 use crate::match_outcome::{MatchOutcome, PropertyShape, UnsatisfiableReason};
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::simple_scheduler_state_manager::{
-    RetryLimits, SimpleSchedulerStateManager, is_lost_record,
+    RetryLimits, SchedulerStateManager, SimpleSchedulerStateManager, is_lost_record,
 };
 use crate::unsatisfiable_tracker::UnsatisfiableTracker;
-use crate::worker::{ActionInfoWithProps, Worker, WorkerTimestamp};
+use crate::worker::{ActionInfoWithProps, ActionsState, Worker, WorkerState, WorkerTimestamp};
 use crate::worker_registry::WorkerRegistry;
 use crate::worker_scheduler::{WorkerScheduler, WorkerSummary};
 
@@ -116,6 +117,12 @@ pub(crate) const DEFAULT_CLIENT_ACTION_TIMEOUT_S: u64 = 60;
 /// Default times a job can retry before failing.
 /// If this changes, remember to change the documentation in the config.
 const DEFAULT_MAX_JOB_RETRIES: usize = 3;
+
+#[derive(Serialize)]
+pub struct SchedulerState {
+    pub actions: ActionsState,
+    pub workers: Vec<WorkerState>,
+}
 
 struct SimpleSchedulerActionStateResult {
     client_operation_id: OperationId,
@@ -180,6 +187,10 @@ pub struct SimpleScheduler {
     /// Manager for client state of this scheduler.
     #[metric(group = "client_state_manager")]
     client_state_manager: Arc<dyn ClientStateManager>,
+
+    /// Manager for scheduler state of this scheduler.
+    #[metric(group = "scheduler_state_manager")]
+    scheduler_state_manager: Arc<dyn SchedulerStateManager>,
 
     /// Manager for platform of this scheduler.
     #[metric(group = "platform_properties")]
@@ -1284,6 +1295,7 @@ impl SimpleScheduler {
             awaited_action_db,
             now_fn,
             Some(worker_registry.clone()),
+            "simple_scheduler",
         );
 
         // The id this scheduler publishes its fleet to its peers under, and
@@ -1301,6 +1313,7 @@ impl SimpleScheduler {
             unacknowledged_kill_timeout_s,
             spec.dispatch_ack_timeout_s,
             worker_registry,
+            "simple_scheduler",
             maybe_origin_event_tx.clone(),
             has_peers,
             record_ttl,
@@ -1558,6 +1571,7 @@ impl SimpleScheduler {
             Self {
                 matching_engine_state_manager: state_manager.clone(),
                 client_state_manager: state_manager.clone(),
+                scheduler_state_manager: state_manager,
                 worker_scheduler,
                 platform_property_manager,
                 maybe_origin_event_tx,
@@ -1596,6 +1610,10 @@ impl ClientStateManager for SimpleScheduler {
         filter: OperationFilter,
     ) -> Result<ActionStateResultStream<'a>, Error> {
         self.inner_filter_operations(filter).await
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

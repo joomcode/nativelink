@@ -60,7 +60,7 @@ exporters:
 
   # Direct OTLP export to Prometheus (when Prometheus has OTLP receiver enabled)
   otlphttp/prometheus:
-    endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+    endpoint: http://prometheus:9090/api/v1/otlp
     compression: gzip
     retry_on_failure:
       enabled: true
@@ -110,6 +110,14 @@ extensions:
 service:
   extensions: [health_check, pprof, zpages]
   pipelines:
+    #traces:
+    #  receivers: [otlp]
+    #  exporters: [debug]
+
+    #logs:
+    #  receivers: [otlp]
+    #  exporters: [debug]
+
     # Main metrics pipeline - exports to Prometheus scrape endpoint
     metrics:
       receivers: [otlp]
@@ -136,10 +144,10 @@ service:
     #   exporters: [otlp/backend]
 
     # Debug pipeline for development
-    # metrics/debug:
-    #   receivers: [otlp]
-    #   processors: [memory_limiter]
-    #   exporters: [debug]
+    #metrics/debug:
+    #  receivers: [otlp]
+    #  processors: [memory_limiter]
+    #  exporters: [debug]
 
   telemetry:
     logs:

@@ -28,8 +28,8 @@ use nativelink_metric::{
 };
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::UpdateForWorker;
 use nativelink_scheduler::awaited_action_db::{
-    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, SortedAwaitedAction,
-    SortedAwaitedActionState,
+    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CountableActionStage,
+    SortedAwaitedAction, SortedAwaitedActionState,
 };
 use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
 use nativelink_scheduler::simple_scheduler::SimpleScheduler;
@@ -69,6 +69,7 @@ async fn drops_missing_actions() -> Result<(), Error> {
         awaited_action_db,
         SystemTime::now,
         None,
+        "test_scheduler",
     );
     state_manager
         .update_operation(
@@ -166,6 +167,7 @@ fn state_manager_with_retries(
         memory_awaited_action_db_factory(0, &task_change_notify, MockInstantWrapped::default),
         MockInstantWrapped::default,
         Some(registry),
+        "test_scheduler",
     )
 }
 
@@ -189,6 +191,7 @@ fn state_manager_no_executing_ceiling(
         memory_awaited_action_db_factory(0, &task_change_notify, MockInstantWrapped::default),
         MockInstantWrapped::default,
         Some(registry),
+        "test_scheduler",
     )
 }
 
@@ -880,6 +883,17 @@ impl<T: AwaitedActionDb> AwaitedActionDb for FaultyDb<T> {
                 .await?,
         ))
     }
+
+    async fn get_queued_actions(&self) -> Result<Vec<Arc<AwaitedAction>>, Error> {
+        self.inner.get_queued_actions().await
+    }
+
+    async fn count_actions(
+        &self,
+        states: Vec<CountableActionStage>,
+    ) -> Result<HashMap<CountableActionStage, usize>, Error> {
+        self.inner.count_actions(states).await
+    }
 }
 
 fn faulty_state_manager(
@@ -907,6 +921,7 @@ fn faulty_state_manager(
         },
         MockInstantWrapped::default,
         Some(Arc::new(WorkerRegistry::new())),
+        "test_scheduler",
     )
 }
 

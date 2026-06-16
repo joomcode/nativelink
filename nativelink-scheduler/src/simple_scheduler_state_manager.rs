@@ -14,10 +14,11 @@
 
 use core::ops::Bound;
 use core::time::Duration;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::string::ToString;
 use std::sync::{Arc, Weak};
 use std::time::SystemTime;
+use std::{env, vec};
 
 use async_lock::Mutex;
 use async_trait::async_trait;
@@ -31,8 +32,9 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::metrics::{
-    AgeBuckets, EXECUTION_METRICS, EXECUTION_RESULT, EXECUTION_STAGE, ExecutionResult,
-    ExecutionStage, record_awaited_action_orphan, record_dispatch_requeue, record_queue_retired,
+    AgeBuckets, EXECUTION_INSTANCE, EXECUTION_METRICS, EXECUTION_RESULT, EXECUTION_STAGE,
+    ExecutionMetricAttrs, ExecutionResult, ExecutionStage, record_awaited_action_orphan,
+    record_dispatch_requeue, record_queue_retired, register_queued_actions_callback,
 };
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, MatchingEngineStateManager,
@@ -44,7 +46,7 @@ use opentelemetry::KeyValue;
 use tracing::{debug, info, trace, warn};
 
 use super::awaited_action_db::{
-    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, PeerScheduler,
+    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CountableActionStage, PeerScheduler,
     SortedAwaitedActionState,
 };
 use crate::worker_registry::{ORPHANED_ACTION_TIMEOUT, SharedWorkerRegistry, WorkerLiveness};
@@ -183,6 +185,135 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
 /// is propagated so the caller retries instead of reporting a clean pass.
 pub(crate) const fn is_lost_record(err: &Error) -> bool {
     matches!(err.code, Code::NotFound | Code::InvalidArgument)
+}
+
+#[derive(Debug)]
+pub struct SchedulerMetrics {
+    attrs: ExecutionMetricAttrs,
+    instance_name: String,
+}
+
+impl SchedulerMetrics {
+    #[must_use]
+    pub fn new(instance_name: impl Into<String>) -> Self {
+        let instance_name = instance_name.into();
+        let base_attrs = vec![KeyValue::new(EXECUTION_INSTANCE, instance_name.clone())];
+        Self {
+            attrs: ExecutionMetricAttrs::new(&base_attrs),
+            instance_name,
+        }
+    }
+
+    pub fn record_stage_transition(&self, from_stage: Option<ActionStage>, to_stage: ActionStage) {
+        if let Some(from) = from_stage {
+            let from_attrs = self.attrs_for_stage(from);
+            EXECUTION_METRICS.execution_active_count.add(-1, from_attrs);
+        }
+
+        let to_attrs = self.attrs_for_stage(to_stage);
+        EXECUTION_METRICS.execution_active_count.add(1, to_attrs);
+        EXECUTION_METRICS
+            .execution_stage_transitions
+            .add(1, to_attrs);
+    }
+
+    pub fn record_queue_time(&self, duration_secs: f64) {
+        EXECUTION_METRICS
+            .execution_queue_time
+            .record(duration_secs, self.attrs.queued());
+    }
+
+    pub fn record_completion(&self, result: ExecutionResult) {
+        let attrs = self.attrs_for_completion_result(result);
+        EXECUTION_METRICS.execution_completed_count.add(1, attrs);
+
+        EXECUTION_METRICS.execution_active_count.add(-1, attrs);
+    }
+
+    pub fn record_retry(&self) {
+        EXECUTION_METRICS
+            .execution_retry_count
+            .add(1, self.attrs.queued());
+    }
+
+    pub fn record_timeout(&self) {
+        let attrs = self.attrs.completed_timeout();
+        EXECUTION_METRICS.execution_completed_count.add(1, attrs);
+    }
+
+    fn attrs_for_stage(&self, stage: ActionStage) -> &[KeyValue] {
+        match stage {
+            ActionStage::Unknown => self.attrs.unknown(),
+            ActionStage::CacheCheck => self.attrs.cache_check(),
+            ActionStage::Queued => self.attrs.queued(),
+            ActionStage::Executing => self.attrs.executing(),
+            ActionStage::Completed(_) | ActionStage::CompletedFromCache(_) => {
+                self.attrs.completed_success()
+            }
+        }
+    }
+
+    fn attrs_for_completion_result(&self, result: ExecutionResult) -> &[KeyValue] {
+        match result {
+            ExecutionResult::Success => self.attrs.completed_success(),
+            ExecutionResult::Failure => self.attrs.completed_failure(),
+            ExecutionResult::Cancelled => self.attrs.completed_cancelled(),
+            ExecutionResult::Timeout => self.attrs.completed_timeout(),
+            ExecutionResult::CacheHit => self.attrs.completed_cache_hit(),
+        }
+    }
+
+    fn record_actions_count(&self, countByStage: HashMap<CountableActionStage, u64>) {
+        for (stage, count) in countByStage {
+            let attrs = self.attrs_for_stage(match stage {
+                CountableActionStage::Queued => ActionStage::Queued,
+                CountableActionStage::Executing => ActionStage::Executing,
+                CountableActionStage::Completed => {
+                    let action_result = ActionResult::default();
+                    ActionStage::Completed(action_result)
+                }
+            });
+
+            EXECUTION_METRICS
+                .execution_actions_count
+                .record(count, attrs);
+        }
+    }
+
+    #[must_use]
+    pub fn instance_name(&self) -> &str {
+        &self.instance_name
+    }
+
+    #[must_use]
+    pub fn make_worker_attrs(&self, worker_id: Option<&WorkerId>) -> Vec<KeyValue> {
+        let mut attrs = vec![KeyValue::new(
+            EXECUTION_INSTANCE,
+            self.instance_name.clone(),
+        )];
+        if let Some(worker_id) = worker_id {
+            attrs.push(KeyValue::new(
+                nativelink_util::metrics::EXECUTION_WORKER_ID,
+                worker_id.to_string(),
+            ));
+        }
+        attrs
+    }
+
+    #[must_use]
+    pub const fn result_from_stage(stage: &ActionStage) -> Option<ExecutionResult> {
+        match stage {
+            ActionStage::Completed(result) => {
+                if result.error.is_some() {
+                    Some(ExecutionResult::Failure)
+                } else {
+                    Some(ExecutionResult::Success)
+                }
+            }
+            ActionStage::CompletedFromCache(_) => Some(ExecutionResult::CacheHit),
+            _ => None,
+        }
+    }
 }
 
 /// Simple struct that implements the `ActionStateResult` trait and always returns an error.
@@ -499,6 +630,91 @@ where
 
     /// Worker registry for checking worker liveness.
     worker_registry: Option<SharedWorkerRegistry>,
+
+    /// OTEL metrics for tracking scheduler and action execution state.
+    /// Provides pre-computed attributes and methods for recording metrics
+    /// related to action execution lifecycle.
+    scheduler_metrics: SchedulerMetrics,
+
+    queued_actions_tracker: Arc<QueuedActionsTracker<T, I, NowFn>>,
+}
+
+#[derive(Debug)]
+struct QueuedActionsTracker<T, I, NowFn>
+where
+    T: AwaitedActionDb,
+    I: InstantWrapper,
+    NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
+{
+    simple_scheduler_state_manager: Weak<SimpleSchedulerStateManager<T, I, NowFn>>,
+    queued_actions: Arc<tokio::sync::Mutex<Vec<(u64, Vec<KeyValue>)>>>,
+}
+
+impl<T, I, NowFn> QueuedActionsTracker<T, I, NowFn>
+where
+    T: AwaitedActionDb,
+    I: InstantWrapper,
+    NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
+{
+    fn new(simple_scheduler_state_manager: Weak<SimpleSchedulerStateManager<T, I, NowFn>>) -> Self {
+        let queued_actions = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        Self {
+            simple_scheduler_state_manager,
+            queued_actions,
+        }
+    }
+
+    fn dump_queued_actions(&self, observer: impl Fn(u64, &[KeyValue])) {
+        if let Ok(queued_actions) = self.queued_actions.try_lock() {
+            for (count, attrs) in queued_actions.iter() {
+                observer(*count, attrs);
+            }
+        }
+    }
+
+    async fn count_queued_actions(&self) {
+        if let Some(manager) = self.simple_scheduler_state_manager.upgrade() {
+            let action_infos = manager
+                .action_db
+                .get_queued_actions()
+                .await
+                .err_tip(|| "In SimpleSchedulerStateManager::record_actions_count")
+                .unwrap_or_default();
+
+            let count_by_properties = action_infos
+                .iter()
+                .map(|awaitedAction| {
+                    awaitedAction
+                        .action_info()
+                        .platform_properties
+                        .clone()
+                        .into_iter()
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .fold(HashMap::new(), |mut acc, platform_properties| {
+                    *acc.entry(platform_properties).or_insert(0) += 1;
+                    acc
+                });
+
+            let mut queued_actions = self.queued_actions.lock().await;
+            queued_actions.clear();
+
+            for (platform_properties, count) in count_by_properties {
+                let mut attrs = platform_properties
+                    .iter()
+                    .map(|(key, value)| KeyValue::new(key.clone(), value.clone()))
+                    .collect::<Vec<KeyValue>>();
+
+                attrs.push(KeyValue::new(
+                    EXECUTION_INSTANCE,
+                    manager.scheduler_metrics.instance_name.clone(),
+                ));
+
+                queued_actions.push((count, attrs));
+            }
+        }
+    }
 }
 
 impl<T, I, NowFn> SimpleSchedulerStateManager<T, I, NowFn>
@@ -515,13 +731,14 @@ where
         action_db: T,
         now_fn: NowFn,
         worker_registry: Option<SharedWorkerRegistry>,
+        instance_name: impl Into<String>,
     ) -> Arc<Self> {
         let RetryLimits {
             max_job_retries,
             max_worker_loss_retries,
             max_escalations,
         } = retry_limits.into();
-        Arc::new_cyclic(|weak_self| Self {
+        let res = Arc::new_cyclic(|weak_self| Self {
             action_db,
             max_job_retries,
             max_worker_loss_retries,
@@ -533,7 +750,115 @@ where
             weak_self: weak_self.clone(),
             now_fn,
             worker_registry,
-        })
+            scheduler_metrics: SchedulerMetrics::new(instance_name),
+            queued_actions_tracker: Arc::new(QueuedActionsTracker::new(weak_self.clone())),
+        });
+
+        let queued_actions_tracker_clone = res.queued_actions_tracker.clone();
+
+        if env::var("NATIVELINK_COUNT_QUEUED_ACTIONS").unwrap_or_default() == "1" {
+            register_queued_actions_callback(Box::new(move |observe| {
+                queued_actions_tracker_clone.dump_queued_actions(observe);
+            }));
+        }
+
+        res
+    }
+
+    /// Returns a reference to the scheduler metrics for recording OTEL metrics.
+    #[must_use]
+    pub const fn metrics(&self) -> &SchedulerMetrics {
+        &self.scheduler_metrics
+    }
+
+    /// Records metrics for an action state update.
+    ///
+    /// This handles stage transitions, retries, completions, and timing metrics.
+    async fn record_action_update_metrics(
+        &self,
+        previous_stage: &ActionStage,
+        new_stage: &ActionStage,
+        is_retry: bool,
+        action_insert_timestamp: std::time::SystemTime,
+    ) {
+        // Only record if the stage actually changed
+        if core::mem::discriminant(previous_stage) != core::mem::discriminant(new_stage) {
+            self.record_actions_count().await;
+            // Record the stage transition
+            self.scheduler_metrics
+                .record_stage_transition(Some(previous_stage.clone()), new_stage.clone());
+
+            // Record queue time when transitioning from Queued to Executing
+            if matches!(previous_stage, ActionStage::Queued)
+                && matches!(new_stage, ActionStage::Executing)
+                && let Ok(queue_duration) = action_insert_timestamp.elapsed()
+            {
+                self.scheduler_metrics
+                    .record_queue_time(queue_duration.as_secs_f64());
+            }
+
+            // Record completion metrics
+            if new_stage.is_finished() {
+                if let Some(result) = SchedulerMetrics::result_from_stage(new_stage) {
+                    self.scheduler_metrics.record_completion(result);
+                }
+
+                if new_stage.has_action_result() && matches!(new_stage, ActionStage::Completed(_)) {
+                    let result = match new_stage {
+                        ActionStage::Completed(action_result) => Some(action_result),
+                        _ => None,
+                    };
+                    if let Some(action_result) = result {
+                        let execution_metadata = &action_result.execution_metadata;
+                        let total_execution_duration = execution_metadata
+                            .worker_completed_timestamp
+                            .duration_since(execution_metadata.worker_start_timestamp)
+                            .unwrap_or(Duration::ZERO);
+
+                        let queue_duration = execution_metadata
+                            .worker_start_timestamp // which is the start of execution
+                            .duration_since(execution_metadata.queued_timestamp)
+                            .unwrap_or(Duration::ZERO);
+
+                        let fetch_duration = execution_metadata
+                            .input_fetch_completed_timestamp
+                            .duration_since(execution_metadata.input_fetch_start_timestamp)
+                            .unwrap_or(Duration::ZERO);
+
+                        let execution_duration = execution_metadata
+                            .execution_completed_timestamp
+                            .duration_since(execution_metadata.execution_start_timestamp)
+                            .unwrap_or(Duration::ZERO);
+
+                        EXECUTION_METRICS.execution_stage_duration.record(
+                            fetch_duration.as_secs_f64(),
+                            self.scheduler_metrics
+                                .attrs_for_stage(ActionStage::CacheCheck),
+                        );
+
+                        EXECUTION_METRICS.execution_stage_duration.record(
+                            queue_duration.as_secs_f64(),
+                            self.scheduler_metrics.attrs_for_stage(ActionStage::Queued),
+                        );
+
+                        EXECUTION_METRICS.execution_stage_duration.record(
+                            execution_duration.as_secs_f64(),
+                            self.scheduler_metrics
+                                .attrs_for_stage(ActionStage::Executing),
+                        );
+
+                        EXECUTION_METRICS
+                            .execution_total_duration
+                            .record(total_execution_duration.as_secs_f64(), &[]);
+                    }
+                }
+            }
+        }
+
+        // Record retry metric
+        if is_retry {
+            self.scheduler_metrics.record_retry();
+        }
     }
 
     /// Retires queued actions whose client has stopped listening.
@@ -987,13 +1312,22 @@ where
                         None => awaited_action.clone(),
                         Some(reloaded_awaited_action) => reloaded_awaited_action.clone(),
                     };
+                    let previous_stage = new_awaited_action.state().stage.clone();
                     new_awaited_action.worker_set_state(state.clone(), (self.now_fn)().now());
                     let err = match self
                         .action_db
                         .update_awaited_action(new_awaited_action)
                         .await
                     {
-                        Ok(()) => break,
+                        Ok(()) => {
+                            // Record client timeout metrics
+                            self.scheduler_metrics.record_timeout();
+                            self.scheduler_metrics.record_stage_transition(
+                                Some(previous_stage.clone()),
+                                state.stage.clone(),
+                            );
+                            break;
+                        }
                         Err(err) => err,
                     };
                     // Reload from the database if the action was outdated.
@@ -1144,6 +1478,9 @@ where
             "Timing out operation"
         );
 
+        // Record timeout metric
+        self.scheduler_metrics.record_timeout();
+
         self.assign_operation(
             operation_id,
             Err(make_err!(Code::DeadlineExceeded, "Operation {cause}")),
@@ -1264,6 +1601,10 @@ where
                     }
                 }
             }
+
+            // Capture the previous stage for metrics tracking
+            let previous_stage = awaited_action.state().stage.clone();
+            let action_insert_timestamp = awaited_action.action_info().insert_timestamp;
 
             let mut is_retry = false;
             let stage = match &update {
@@ -1426,7 +1767,7 @@ where
             }
             awaited_action.worker_set_state(
                 Arc::new(ActionState {
-                    stage,
+                    stage: stage.clone(),
                     // Client id is not known here, it is the responsibility of
                     // the the subscriber impl to replace this with the
                     // correct client id.
@@ -1473,6 +1814,16 @@ where
                 update_type = %update_type_str,
                 "inner_update_operation SUCCESS"
             );
+
+            // Record metrics for the stage transition
+            self.record_action_update_metrics(
+                &previous_stage,
+                &stage,
+                is_retry,
+                action_insert_timestamp,
+            )
+            .await;
+
             return Ok(());
         }
 
@@ -1496,14 +1847,24 @@ where
         new_client_operation_id: OperationId,
         action_info: Arc<ActionInfo>,
     ) -> Result<T::Subscriber, Error> {
-        self.action_db
+        let result = self
+            .action_db
             .add_action(
                 new_client_operation_id,
                 action_info,
                 self.no_event_action_timeout,
             )
             .await
-            .err_tip(|| "In SimpleSchedulerStateManager::add_operation")
+            .err_tip(|| "In SimpleSchedulerStateManager::add_operation");
+
+        // Record metrics for new action entering the queue
+        if result.is_ok() {
+            self.scheduler_metrics
+                .record_stage_transition(None, ActionStage::Queued);
+            self.record_actions_count().await;
+        }
+
+        result
     }
 
     async fn inner_filter_operations<'a, F>(
@@ -1646,6 +2007,45 @@ where
             });
         Ok(Box::pin(stream))
     }
+
+    const STAGES: [CountableActionStage; 3] = [
+        CountableActionStage::Queued,
+        CountableActionStage::Executing,
+        CountableActionStage::Completed,
+    ];
+
+    async fn record_actions_count(&self) {
+        if env::var("NATIVELINK_COUNT_ACTIONS_DB").unwrap_or_default() == "1" {
+            let count = self
+                .action_db
+                .count_actions(Self::STAGES.to_vec())
+                .await
+                .err_tip(|| "In SimpleSchedulerStateManager::record_actions_count")
+                .unwrap();
+            self.scheduler_metrics.record_actions_count(
+                count
+                    .iter()
+                    .map(|(stage, count)| (stage.clone(), *count as u64))
+                    .collect(),
+            );
+        }
+
+        if env::var("NATIVELINK_COUNT_QUEUED_ACTIONS").unwrap_or_default() == "1" {
+            self.queued_actions_tracker.count_queued_actions().await;
+        }
+    }
+}
+
+#[async_trait]
+pub trait SchedulerStateManager: MatchingEngineStateManager + ClientStateManager {}
+
+#[async_trait]
+impl<T, I, NowFn> SchedulerStateManager for SimpleSchedulerStateManager<T, I, NowFn>
+where
+    T: AwaitedActionDb,
+    I: InstantWrapper,
+    NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
+{
 }
 
 /// A listed entry the store could not even hand over: the row was gone
@@ -1728,6 +2128,10 @@ where
             ))
         })
         .await
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

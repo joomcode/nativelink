@@ -58,7 +58,7 @@ impl InstrumentProvider for CountingMeterProvider {
     ) -> UpDownCounter<i64> {
         UpDownCounter::new(Arc::new(CountingInstrument {
             counts: self.0.clone(),
-            enabled: builder.name == "execution.active.count",
+            enabled: builder.name == "execution_active_count",
         }))
     }
 }
@@ -72,7 +72,7 @@ impl SyncInstrument<i64> for CountingInstrument {
     fn measure(&self, change: i64, attributes: &[KeyValue]) {
         if self.enabled
             && attributes.iter().any(|attr| {
-                attr.key.as_str() == "execution.stage" && attr.value.to_string() == "executing"
+                attr.key.as_str() == "execution_stage" && attr.value.to_string() == "executing"
             })
         {
             self.counts.fetch_add(change, Ordering::SeqCst);
