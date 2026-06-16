@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::any::Any;
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -303,6 +304,10 @@ impl ClientStateManager for HistoricalResourceScheduler {
             .err_tip(|| "Inner scheduler not available for HistoricalResourceScheduler")?
             .filter_operations(filter)
             .await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
