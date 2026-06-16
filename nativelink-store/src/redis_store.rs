@@ -1548,6 +1548,13 @@ where
 {
     type SubscriptionManager = RedisSubscriptionManager;
 
+    async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send,
+    {
+        Err(make_err!(Code::Unimplemented, "Not implemented"))
+    }
+
     async fn subscription_manager(&self) -> Result<Arc<RedisSubscriptionManager>, Error> {
         self.subscription_manager
             .get_or_try_init(|| async move {
