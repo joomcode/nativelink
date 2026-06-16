@@ -296,6 +296,8 @@ impl<I: InstantWrapper> StoreDriver for ExistenceCacheStore<I> {
                 .existence_cache
                 .insert(digest, ExistenceItem(digest.size_bytes()))
                 .await;
+        } else {
+            let _ = self.existence_cache.remove(&digest).await;
         }
         result
     }
