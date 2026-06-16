@@ -349,6 +349,10 @@ impl ClientStateManager for GrpcScheduler {
     ) -> Result<ActionStateResultStream<'a>, Error> {
         self.inner_filter_operations(filter).await
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 #[async_trait]

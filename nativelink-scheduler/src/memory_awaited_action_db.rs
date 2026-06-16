@@ -39,7 +39,7 @@ use tracing::{debug, error};
 
 use crate::awaited_action_db::{
     AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CLIENT_KEEPALIVE_DURATION,
-    SortedAwaitedAction, SortedAwaitedActionState,
+    CountableActionStage, SortedAwaitedAction, SortedAwaitedActionState,
 };
 
 /// Number of events to process per cycle.
@@ -244,6 +244,17 @@ impl SortedAwaitedActions {
             ActionStage::Queued => &mut self.queued,
             ActionStage::Executing => &mut self.executing,
             ActionStage::Completed(_) | ActionStage::CompletedFromCache(_) => &mut self.completed,
+        }
+    }
+
+    const fn btree_for_countable_stage(
+        &mut self,
+        stage: &CountableActionStage,
+    ) -> &mut BTreeSet<SortedAwaitedAction> {
+        match stage {
+            CountableActionStage::Queued => &mut self.queued,
+            CountableActionStage::Executing => &mut self.executing,
+            CountableActionStage::Completed => &mut self.completed,
         }
     }
 
@@ -578,6 +589,12 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync> AwaitedActionDbI
                 // action_info_hash_key_to_awaited_action.
             }
         }
+    }
+
+    fn count_actions(&mut self, stage: CountableActionStage) -> usize {
+        self.sorted_action_info_hash_keys
+            .btree_for_countable_stage(&stage)
+            .len()
     }
 
     fn update_awaited_action(
@@ -990,6 +1007,22 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
         Ok(self.inner.lock().await.get_by_operation_id(operation_id))
     }
 
+    async fn get_queued_actions(&self) -> Result<Vec<Arc<AwaitedAction>>, Error> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner
+            .sorted_action_info_hash_keys
+            .queued
+            .iter()
+            .filter_map(|awaited_action| {
+                inner
+                    .operation_id_to_awaited_action
+                    .get(&awaited_action.operation_id)
+            })
+            .map(|awaited_action| Arc::new(awaited_action.borrow().clone()))
+            .collect())
+    }
+
     async fn get_range_of_actions(
         &self,
         state: SortedAwaitedActionState,
@@ -1035,6 +1068,18 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
                 Ok(Some(((new_start.cloned(), new_end.cloned()), output)))
             },
         ))
+    }
+
+    async fn count_actions(
+        &self,
+        stages: Vec<CountableActionStage>,
+    ) -> Result<HashMap<CountableActionStage, usize>, Error> {
+        let mut results: HashMap<CountableActionStage, usize> =
+            HashMap::with_capacity(stages.len());
+        for stage in stages {
+            results.insert(stage, self.inner.lock().await.count_actions(stage));
+        }
+        Ok(results)
     }
 
     async fn update_awaited_action(&self, new_awaited_action: AwaitedAction) -> Result<(), Error> {
