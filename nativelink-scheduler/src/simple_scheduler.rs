@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use async_trait::async_trait;
-use futures::{future, Future, StreamExt};
+use futures::{Future, StreamExt, future};
 use nativelink_config::schedulers::SimpleSpec;
 use nativelink_error::{Code, Error, ResultExt};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
@@ -25,6 +25,7 @@ use nativelink_proto::com::github::trace_machina::nativelink::events::OriginEven
 use nativelink_util::action_messages::{ActionInfo, ActionState, OperationId, WorkerId};
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
+use nativelink_util::metrics::EXECUTION_METRICS;
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, MatchingEngineStateManager,
     OperationFilter, OperationStageFlags, OrderDirection, UpdateOperationType,
@@ -34,11 +35,12 @@ use nativelink_util::platform_properties::PlatformProperties;
 use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::spawn;
 use nativelink_util::task::JoinHandleDropGuard;
+use opentelemetry::KeyValue;
 use opentelemetry::baggage::BaggageExt;
 use opentelemetry::context::{Context, FutureExt as OtelFutureExt};
-use opentelemetry::KeyValue;
 use opentelemetry_semantic_conventions::attribute::ENDUSER_ID;
-use tokio::sync::{mpsc, Notify};
+use serde::Serialize;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Duration;
 use tracing::{debug, error, info, info_span, warn};
 
@@ -49,8 +51,6 @@ use crate::simple_scheduler_state_manager::{SchedulerStateManager, SimpleSchedul
 use crate::worker::{ActionInfoWithProps, ActionsState, Worker, WorkerState, WorkerTimestamp};
 use crate::worker_registry::WorkerRegistry;
 use crate::worker_scheduler::WorkerScheduler;
-use serde::Serialize;
-use nativelink_util::metrics::EXECUTION_METRICS;
 
 /// Default timeout for workers in seconds.
 /// If this changes, remember to change the documentation in the config.
@@ -360,7 +360,9 @@ impl SimpleScheduler {
         }
 
         let total_elapsed = start.elapsed();
-        EXECUTION_METRICS.do_try_match_duration.record(total_elapsed.as_secs_f64(), &[]);
+        EXECUTION_METRICS
+            .do_try_match_duration
+            .record(total_elapsed.as_secs_f64(), &[]);
         if total_elapsed > Duration::from_secs(5) {
             warn!(
                 total_ms = total_elapsed.as_millis(),
@@ -406,20 +408,20 @@ impl SimpleScheduler {
             origin_metadata: OriginMetadata,
         }
 
-        let mut prepared_actions: Vec<PreparedAction> = Vec::with_capacity(action_state_results.len());
-        let mut platform_properties_refs: Vec<&PlatformProperties> = Vec::with_capacity(action_state_results.len());
+        let mut prepared_actions: Vec<PreparedAction> =
+            Vec::with_capacity(action_state_results.len());
+        let mut platform_properties_refs: Vec<&PlatformProperties> =
+            Vec::with_capacity(action_state_results.len());
 
         for action_state_result in action_state_results {
-            let (action_info, maybe_origin_metadata) = match action_state_result
-                .as_action_info()
-                .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    warn!(?err, "Failed to get action_info in batch mode, skipping");
-                    continue;
-                }
-            };
+            let (action_info, maybe_origin_metadata) =
+                match action_state_result.as_action_info().await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        warn!(?err, "Failed to get action_info in batch mode, skipping");
+                        continue;
+                    }
+                };
 
             // TODO(palfrey) We should not compute this every time and instead store
             // it with the ActionInfo when we receive it.
@@ -429,7 +431,10 @@ impl SimpleScheduler {
             {
                 Ok(props) => props,
                 Err(err) => {
-                    warn!(?err, "Failed to make platform properties in batch mode, skipping");
+                    warn!(
+                        ?err,
+                        "Failed to make platform properties in batch mode, skipping"
+                    );
                     continue;
                 }
             };
@@ -517,10 +522,9 @@ impl SimpleScheduler {
 
             // Merge notification results
             for notify_result in notify_results {
-                result = result.merge(
-                    notify_result
-                        .err_tip(|| "Failed to run batch_worker_notify_run_action in do_try_match_batch"),
-                );
+                result = result.merge(notify_result.err_tip(
+                    || "Failed to run batch_worker_notify_run_action in do_try_match_batch",
+                ));
             }
         }
 
@@ -719,7 +723,8 @@ impl SimpleScheduler {
                                     }
                                 };
 
-                                let res = scheduler.do_try_match_internal(full_worker_logging).await;
+                                let res =
+                                    scheduler.do_try_match_internal(full_worker_logging).await;
                                 if full_worker_logging {
                                     let operations_stream = scheduler
                                         .matching_engine_state_manager
@@ -854,7 +859,7 @@ impl ClientStateManager for SimpleScheduler {
         Some(self)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }

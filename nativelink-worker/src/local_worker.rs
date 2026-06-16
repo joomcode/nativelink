@@ -23,10 +23,13 @@ use std::env;
 use std::process::Stdio;
 use std::sync::{Arc, Weak};
 use std::time::Instant;
+
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, StreamExt, TryFutureExt, select};
-use nativelink_config::cas_server::{EnvironmentSource, ExecutionCompletionBehaviour, LocalWorkerConfig};
+use nativelink_config::cas_server::{
+    EnvironmentSource, ExecutionCompletionBehaviour, LocalWorkerConfig,
+};
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::update_for_worker::Update;
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::worker_api_client::WorkerApiClient;
@@ -38,6 +41,7 @@ use nativelink_store::fast_slow_store::FastSlowStore;
 use nativelink_util::action_messages::{ActionResult, ActionStage, OperationId};
 use nativelink_util::common::fs;
 use nativelink_util::digest_hasher::DigestHasherFunc;
+use nativelink_util::metrics::{LOCAL_WORKER_METRICS, WorkerMetricAttrs};
 use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::Store;
 use nativelink_util::{spawn, tls_utils};
@@ -49,7 +53,7 @@ use tokio::time::sleep;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::Streaming;
 use tracing::{Level, debug, error, event, info, info_span, instrument, trace, warn};
-use nativelink_util::metrics::{WorkerMetricAttrs, LOCAL_WORKER_METRICS};
+
 use crate::running_actions_manager::{
     ExecutionConfiguration, Metrics as RunningActionManagerMetrics, RunningAction,
     RunningActionsManager, RunningActionsManagerArgs, RunningActionsManagerImpl,
@@ -866,21 +870,21 @@ impl Metrics {
         }
     }
 
-    /// Increment the start_actions_received counter
+    /// Increment the `start_actions_received` counter
     pub fn inc_start_actions_received(&self) {
         LOCAL_WORKER_METRICS
             .start_actions_received
             .add(1, self.attrs.base());
     }
 
-    /// Increment the disconnects_received counter
+    /// Increment the `disconnects_received` counter
     pub fn inc_disconnects_received(&self) {
         LOCAL_WORKER_METRICS
             .disconnects_received
             .add(1, self.attrs.base());
     }
 
-    /// Increment the keep_alives_received counter
+    /// Increment the `keep_alives_received` counter
     pub fn inc_keep_alives_received(&self) {
         LOCAL_WORKER_METRICS
             .keep_alives_received

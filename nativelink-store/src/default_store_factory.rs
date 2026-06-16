@@ -24,6 +24,7 @@ use nativelink_error::Error;
 use nativelink_util::health_utils::HealthRegistryBuilder;
 use nativelink_util::metrics::StoreType;
 use nativelink_util::store_trait::{Store, StoreDriver};
+
 use crate::completeness_checking_store::CompletenessCheckingStore;
 use crate::compression_store::CompressionStore;
 use crate::dedup_store::DedupStore;
@@ -140,13 +141,13 @@ pub fn store_factory<'a>(
             )))
         } else {
             Ok(store)
-        }
+        };
     })
 }
 
 fn should_wrap_in_metrics_store(spec: &StoreSpec) -> bool {
     if env::var("NL_STORE_METRICS").is_err() {
-        return false
+        return false;
     }
 
     matches!(

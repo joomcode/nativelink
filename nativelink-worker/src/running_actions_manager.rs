@@ -1529,8 +1529,7 @@ impl RunningAction for RunningActionImpl {
             "upload_results: starting with timeout",
         );
         let metrics = self.metrics().clone();
-        let upload_fut = metrics
-            .wrap_upload_results(Self::inner_upload_results(self));
+        let upload_fut = metrics.wrap_upload_results(Self::inner_upload_results(self));
 
         let stall_warn_fut = async {
             let mut elapsed_secs = 0u64;
@@ -2388,7 +2387,7 @@ impl MetricsTimer {
 
 impl Metrics {
     /// Create a new Metrics instance with optional attributes.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { attrs: Vec::new() }
     }
 

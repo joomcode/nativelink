@@ -144,10 +144,7 @@ impl MockWorkerApiClient {
         req
     }
 
-    pub(crate) async fn expect_going_away(
-        &self,
-        result: Result<(), Error>,
-    ) -> GoingAwayRequest {
+    pub(crate) async fn expect_going_away(&self, result: Result<(), Error>) -> GoingAwayRequest {
         let mut rx_call_lock = self.rx_call.lock().await;
         let req = match rx_call_lock
             .recv()
@@ -186,10 +183,10 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
             WorkerClientApiReturns::ConnectWorker(result) => result,
             resp @ WorkerClientApiReturns::ExecutionResponse(_) => {
                 panic!("connect_worker expected ConnectWorker response, received {resp:?}")
-            },
+            }
             resp @ WorkerClientApiReturns::GoingAway(_) => {
                 panic!("connect_worker expected ConnectWorker response, received {resp:?}")
-            },
+            }
         }
     }
 
@@ -271,7 +268,9 @@ pub(crate) async fn setup_local_worker_with_config(
     let (shutdown_tx_test, _) = broadcast::channel::<ShutdownGuard>(BROADCAST_CAPACITY);
 
     let drop_guard = spawn!("local_worker_spawn", async move {
-        worker.run(shutdown_tx_test.clone(), shutdown_tx_test.subscribe()).await
+        worker
+            .run(shutdown_tx_test.clone(), shutdown_tx_test.subscribe())
+            .await
     });
 
     let (tx_stream, streaming_response) = setup_grpc_stream();

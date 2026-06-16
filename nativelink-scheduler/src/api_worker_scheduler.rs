@@ -22,13 +22,13 @@ use std::time::{Instant, UNIX_EPOCH};
 use async_lock::RwLock;
 use lru::LruCache;
 use nativelink_config::schedulers::WorkerAllocationStrategy;
-use nativelink_error::{error_if, make_err, make_input_err, Code, Error, ResultExt};
+use nativelink_error::{Code, Error, ResultExt, error_if, make_err, make_input_err};
 use nativelink_metric::{
-    group, MetricFieldData, MetricKind, MetricPublishKnownKindData,
-    MetricsComponent, RootMetricsComponent,
+    MetricFieldData, MetricKind, MetricPublishKnownKindData, MetricsComponent,
+    RootMetricsComponent, group,
 };
 use nativelink_util::action_messages::{OperationId, WorkerId};
-use nativelink_util::metrics::{WORKER_POOL_METRICS, WORKER_POOL_INSTANCE, WorkerPoolMetricAttrs};
+use nativelink_util::metrics::{WORKER_POOL_INSTANCE, WORKER_POOL_METRICS, WorkerPoolMetricAttrs};
 use nativelink_util::operation_state_manager::{UpdateOperationType, WorkerStateManager};
 use nativelink_util::platform_properties::PlatformProperties;
 use nativelink_util::shutdown_guard::ShutdownGuard;
@@ -63,7 +63,10 @@ pub struct SchedulerMetrics {
 }
 
 use crate::platform_property_manager::PlatformPropertyManager;
-use crate::worker::{reduce_platform_properties, Worker, ActionInfoWithProps, WorkerState, WorkerTimestamp, WorkerUpdate};
+use crate::worker::{
+    ActionInfoWithProps, Worker, WorkerState, WorkerTimestamp, WorkerUpdate,
+    reduce_platform_properties,
+};
 use crate::worker_capability_index::WorkerCapabilityIndex;
 use crate::worker_registry::SharedWorkerRegistry;
 use crate::worker_scheduler::WorkerScheduler;
@@ -96,11 +99,15 @@ impl WorkerSchedulerMetrics {
     }
 
     pub fn record_worker_removed(&self) {
-        WORKER_POOL_METRICS.worker_events.add(1, self.attrs.removed());
+        WORKER_POOL_METRICS
+            .worker_events
+            .add(1, self.attrs.removed());
     }
 
     pub fn record_worker_timeout(&self) {
-        WORKER_POOL_METRICS.worker_events.add(1, self.attrs.timeout());
+        WORKER_POOL_METRICS
+            .worker_events
+            .add(1, self.attrs.timeout());
     }
 
     pub fn record_worker_connection_failed(&self) {
@@ -385,7 +392,7 @@ impl ApiWorkerSchedulerImpl {
 
     /// Batch finds workers for multiple actions in a single pass.
     /// This reduces lock contention by acquiring the lock once for all actions.
-    /// Returns a map of (action_index, worker_id) pairs for successful matches.
+    /// Returns a map of (`action_index`, `worker_id`) pairs for successful matches.
     fn inner_batch_find_workers_for_actions(
         &self,
         actions: &[&PlatformProperties],
@@ -409,16 +416,23 @@ impl ApiWorkerSchedulerImpl {
                     }
 
                     if !workers_platform_properties.contains_key(&worker_id) {
-                        workers_platform_properties.insert(worker_id.clone(), worker.platform_properties.clone());
+                        workers_platform_properties
+                            .insert(worker_id.clone(), worker.platform_properties.clone());
                     }
 
-                    if !platform_properties.is_satisfied_by(&workers_platform_properties[&worker_id], full_worker_logging) {
+                    if !platform_properties.is_satisfied_by(
+                        &workers_platform_properties[&worker_id],
+                        full_worker_logging,
+                    ) {
                         continue;
                     }
 
-                    reduce_platform_properties(workers_platform_properties.get_mut(&worker_id).unwrap(), platform_properties);
+                    reduce_platform_properties(
+                        workers_platform_properties.get_mut(&worker_id).unwrap(),
+                        platform_properties,
+                    );
 
-                   results.insert(idx, worker_id.clone());
+                    results.insert(idx, worker_id.clone());
                     break;
                 }
             }
@@ -660,7 +674,10 @@ impl ApiWorkerSchedulerImpl {
     }
 
     fn count_running_actions(&self) -> usize {
-        self.workers.iter().map(|(_, w)| w.running_action_infos.len()).sum()
+        self.workers
+            .iter()
+            .map(|(_, w)| w.running_action_infos.len())
+            .sum()
     }
 }
 
@@ -720,7 +737,7 @@ impl ApiWorkerScheduler {
 
     /// Returns a reference to the worker scheduler metrics for recording OTEL metrics.
     #[must_use]
-    pub fn workerMetrics(&self) -> &WorkerSchedulerMetrics {
+    pub const fn workerMetrics(&self) -> &WorkerSchedulerMetrics {
         &self.worker_scheduler_metrics
     }
 
@@ -744,7 +761,8 @@ impl ApiWorkerScheduler {
         } else {
             self.worker_scheduler_metrics.record_dispatch_failure();
         }
-        self.worker_scheduler_metrics.record_running_actions_count(inner.count_running_actions());
+        self.worker_scheduler_metrics
+            .record_running_actions_count(inner.count_running_actions());
 
         result
     }
@@ -764,7 +782,9 @@ impl ApiWorkerScheduler {
             .fetch_add(count as u64, Ordering::Relaxed);
 
         let mut inner = self.inner.write().await;
-        let results = inner.inner_batch_worker_notify_run_action(assignments).await;
+        let results = inner
+            .inner_batch_worker_notify_run_action(assignments)
+            .await;
 
         // Record metrics
         let successes = results.iter().filter(|r| r.is_ok()).count();
@@ -832,7 +852,7 @@ impl ApiWorkerScheduler {
     /// This reduces lock contention compared to calling `find_worker_for_action`
     /// for each action individually.
     ///
-    /// Returns a vector of (action_index, worker_id) pairs for successful matches.
+    /// Returns a vector of (`action_index`, `worker_id`) pairs for successful matches.
     /// Actions that couldn't be matched to a worker are not included in the result.
     pub async fn batch_find_workers_for_actions(
         &self,
@@ -846,8 +866,7 @@ impl ApiWorkerScheduler {
 
         let inner = self.inner.read().await;
         let worker_count = inner.workers.len() as u64;
-        let results =
-            inner.inner_batch_find_workers_for_actions(actions, full_worker_logging);
+        let results = inner.inner_batch_find_workers_for_actions(actions, full_worker_logging);
 
         // Track metrics
         self.metrics
@@ -917,7 +936,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
             .add_worker(worker)
             .err_tip(|| "Error while adding worker, removing from pool");
         if let Err(err) = &result {
-            self.worker_scheduler_metrics.record_worker_connection_failed();
+            self.worker_scheduler_metrics
+                .record_worker_connection_failed();
             return Result::<(), _>::Err(err.clone()).merge(
                 inner
                     .immediate_evict_worker(&worker_id, err.clone(), false)
@@ -930,7 +950,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
 
         self.metrics.workers_added.fetch_add(1, Ordering::Relaxed);
         self.worker_scheduler_metrics.record_worker_added();
-        self.worker_scheduler_metrics.record_worker_count(inner.workers.len());
+        self.worker_scheduler_metrics
+            .record_worker_count(inner.workers.len());
         Ok(())
     }
 
@@ -955,7 +976,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
         if result.is_ok() && is_completion {
             self.worker_scheduler_metrics.record_action_completed();
         }
-        self.worker_scheduler_metrics.record_running_actions_count(inner.count_running_actions());
+        self.worker_scheduler_metrics
+            .record_running_actions_count(inner.count_running_actions());
 
         result
     }
@@ -992,7 +1014,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
 
         // Record worker removal
         self.worker_scheduler_metrics.record_worker_removed();
-        self.worker_scheduler_metrics.record_worker_count(inner.workers.len());
+        self.worker_scheduler_metrics
+            .record_worker_count(inner.workers.len());
         result
     }
 
@@ -1086,8 +1109,10 @@ impl WorkerScheduler for ApiWorkerScheduler {
             self.worker_scheduler_metrics.record_worker_timeout();
         }
 
-        self.worker_scheduler_metrics.record_running_actions_count(inner.count_running_actions());
-        self.worker_scheduler_metrics.record_worker_count(inner.workers.len());
+        self.worker_scheduler_metrics
+            .record_running_actions_count(inner.count_running_actions());
+        self.worker_scheduler_metrics
+            .record_worker_count(inner.workers.len());
 
         result
     }
@@ -1095,7 +1120,8 @@ impl WorkerScheduler for ApiWorkerScheduler {
     async fn set_drain_worker(&self, worker_id: &WorkerId, is_draining: bool) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
         inner.set_drain_worker(worker_id, is_draining).await?;
-        self.worker_scheduler_metrics.record_worker_count(inner.workers.len());
+        self.worker_scheduler_metrics
+            .record_worker_count(inner.workers.len());
         Ok(())
     }
 }

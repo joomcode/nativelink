@@ -193,7 +193,7 @@ impl ClientStateManager for MockActionScheduler {
         Some(self)
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }

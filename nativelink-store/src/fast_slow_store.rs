@@ -30,6 +30,7 @@ use nativelink_util::buf_channel::{
 };
 use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatusIndicator, default_health_status_indicator};
+use nativelink_util::metrics::FAST_SLOW_STORE_METRICS;
 use nativelink_util::store_trait::{
     RemoveItemCallback, Store, StoreDriver, StoreKey, StoreLike, StoreOptimizations,
     UploadSizeInfo, slow_update_store_with_file,
@@ -37,7 +38,6 @@ use nativelink_util::store_trait::{
 use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};
-use nativelink_util::metrics::FAST_SLOW_STORE_METRICS;
 
 // TODO(palfrey) This store needs to be evaluated for more efficient memory usage,
 // there are many copies happening internally.

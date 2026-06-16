@@ -382,7 +382,7 @@ impl ClientStateManager for CacheLookupScheduler {
         self.action_scheduler.as_known_platform_property_provider()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }
