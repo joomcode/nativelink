@@ -33,7 +33,7 @@ use crate::known_platform_property_provider::KnownPlatformPropertyProvider;
 pub struct PropertyModifierScheduler {
     modifications: Vec<PropertyModification>,
     #[metric(group = "scheduler")]
-    scheduler: Option<Arc<dyn KnownPlatformPropertyProvider>>,
+    pub scheduler: Option<Arc<dyn KnownPlatformPropertyProvider>>,
     #[metric(group = "property_manager")]
     known_properties: Mutex<HashMap<String, Vec<String>>>,
 }
@@ -173,6 +173,10 @@ impl ClientStateManager for PropertyModifierScheduler {
         filter: OperationFilter,
     ) -> Result<ActionStateResultStream<'a>, Error> {
         self.inner_filter_operations(filter).await
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

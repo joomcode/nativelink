@@ -14,11 +14,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
 
 use crate::action_messages::ActionStage;
+
+/// Callback type for observable gauges that report queued action counts.
+/// The callback receives an `Observer` that should be used to record values with attributes.
+pub type QueuedActionsCallback = Box<dyn Fn(&dyn Fn(u64, &[KeyValue])) + Send + Sync>;
+
+/// Storage for the external callback for queued actions count.
+static QUEUED_ACTIONS_CALLBACK: OnceLock<QueuedActionsCallback> = OnceLock::new();
+
+/// Registers an external callback for the `execution_queued_actions_count` observable gauge.
+///
+/// This function can only be called once. Subsequent calls will panic.
+///
+/// The callback will be invoked during metrics collection and should report
+/// the current count of queued actions by calling the provided observer function
+/// with the count and any relevant attributes (e.g., platform properties).
+///
+/// # Panics
+///
+/// Panics if the callback has already been registered.
+///
+/// # Example
+/// ```ignore
+/// register_queued_actions_callback(Box::new(|observe| {
+///     // Report counts for different platform configurations
+///     observe(10, &[KeyValue::new("platform", "linux")]);
+///     observe(5, &[KeyValue::new("platform", "windows")]);
+/// }));
+/// ```
+pub fn register_queued_actions_callback(callback: QueuedActionsCallback) {
+    assert!(
+        !QUEUED_ACTIONS_CALLBACK.set(callback).is_err(),
+        "Queued actions callback can only be registered once"
+    );
+}
 
 // Metric attribute keys for cache operations.
 pub const CACHE_TYPE: &str = "cache.type";
@@ -26,13 +60,13 @@ pub const CACHE_OPERATION: &str = "cache.operation.name";
 pub const CACHE_RESULT: &str = "cache.operation.result";
 
 // Metric attribute keys for remote execution operations.
-pub const EXECUTION_STAGE: &str = "execution.stage";
-pub const EXECUTION_RESULT: &str = "execution.result";
-pub const EXECUTION_INSTANCE: &str = "execution.instance";
-pub const EXECUTION_PRIORITY: &str = "execution.priority";
-pub const EXECUTION_WORKER_ID: &str = "execution.worker_id";
-pub const EXECUTION_EXIT_CODE: &str = "execution.exit_code";
-pub const EXECUTION_ACTION_DIGEST: &str = "execution.action_digest";
+pub const EXECUTION_STAGE: &str = "execution_stage";
+pub const EXECUTION_RESULT: &str = "execution_result";
+pub const EXECUTION_INSTANCE: &str = "execution_instance";
+pub const EXECUTION_PRIORITY: &str = "execution_priority";
+pub const EXECUTION_WORKER_ID: &str = "execution_worker_id";
+pub const EXECUTION_EXIT_CODE: &str = "execution_exit_code";
+pub const EXECUTION_ACTION_DIGEST: &str = "execution_action_digest";
 
 /// Cache operation types for metrics classification.
 #[derive(Debug, Clone, Copy)]
@@ -141,7 +175,7 @@ impl From<&ActionStage> for ExecutionStage {
 }
 
 /// Results of remote execution operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionResult {
     /// Execution completed successfully
     Success,
@@ -463,7 +497,7 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
 
     ExecutionMetrics {
         execution_stage_duration: meter
-            .f64_histogram("execution.stage.duration")
+            .f64_histogram("execution_stage_duration")
             .with_description("Duration of each execution stage in seconds")
             .with_unit("s")
             .with_boundaries(vec![
@@ -488,7 +522,7 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_total_duration: meter
-            .f64_histogram("execution.total.duration")
+            .f64_histogram("execution_total_duration")
             .with_description(
                 "Total duration of action execution from submission to completion in seconds",
             )
@@ -513,7 +547,7 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_queue_time: meter
-            .f64_histogram("execution.queue.time")
+            .f64_histogram("execution_queue_time")
             .with_description("Time spent waiting in queue before execution in seconds")
             .with_unit("s")
             .with_boundaries(vec![
@@ -533,25 +567,25 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_active_count: meter
-            .i64_up_down_counter("execution.active.count")
+            .i64_up_down_counter("execution_active_count")
             .with_description("Number of actions currently in each stage")
             .with_unit("{action}")
             .build(),
 
         execution_completed_count: meter
-            .u64_counter("execution.completed.count")
+            .u64_counter("execution_completed_count")
             .with_description("Total number of completed executions by result")
             .with_unit("{action}")
             .build(),
 
         execution_stage_transitions: meter
-            .u64_counter("execution.stage.transitions")
+            .u64_counter("execution_stage_transitions")
             .with_description("Number of stage transitions")
             .with_unit("{transition}")
             .build(),
 
         execution_output_size: meter
-            .u64_histogram("execution.output.size")
+            .u64_histogram("execution_output_size")
             .with_description("Size of execution outputs in bytes")
             .with_unit("By")
             .with_boundaries(vec![
@@ -567,7 +601,7 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_cpu_time: meter
-            .f64_histogram("execution.cpu.time")
+            .f64_histogram("execution_cpu_time")
             .with_description("CPU time consumed by action execution in seconds")
             .with_unit("s")
             .with_boundaries(vec![
@@ -584,7 +618,7 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_memory_usage: meter
-            .u64_histogram("execution.memory.usage")
+            .u64_histogram("execution_memory_usage")
             .with_description("Peak memory usage during execution in bytes")
             .with_unit("By")
             .with_boundaries(vec![
@@ -600,9 +634,28 @@ pub static EXECUTION_METRICS: LazyLock<ExecutionMetrics> = LazyLock::new(|| {
             .build(),
 
         execution_retry_count: meter
-            .u64_counter("execution.retry.count")
+            .u64_counter("execution_retry_count")
             .with_description("Number of execution retries")
             .with_unit("{retry}")
+            .build(),
+
+        execution_actions_count: meter
+            .u64_gauge("execution_actions_count")
+            .with_description("Current number of actions in each stage")
+            .with_unit("{action}")
+            .build(),
+
+        execution_queued_actions_count: meter
+            .u64_observable_gauge("execution_queued_actions_count_observable")
+            .with_description("Current number of queued actions by platform properties")
+            .with_unit("{action}")
+            .with_callback(|observer| {
+                if let Some(callback) = QUEUED_ACTIONS_CALLBACK.get() {
+                    callback(&|value, attrs| {
+                        observer.observe(value, attrs);
+                    });
+                }
+            })
             .build(),
     }
 });
@@ -630,6 +683,10 @@ pub struct ExecutionMetrics {
     pub execution_memory_usage: metrics::Histogram<u64>,
     /// Counter for execution retries
     pub execution_retry_count: metrics::Counter<u64>,
+    /// Gauge of actions by stage
+    pub execution_actions_count: metrics::Gauge<u64>,
+    // Gauge of queued actions by platform properties
+    pub execution_queued_actions_count: metrics::ObservableGauge<u64>,
 }
 
 /// Helper function to create attributes for execution metrics
@@ -650,4 +707,191 @@ pub fn make_execution_attributes(
     }
 
     attrs
+}
+
+// Metric attribute keys for worker pool operations.
+pub const WORKER_POOL_INSTANCE: &str = "worker_pool_instance";
+pub const WORKER_EVENT_TYPE: &str = "worker_pool_event_type";
+pub const WORKER_STATE: &str = "worker_pool_state";
+
+/// Worker event types for metrics classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerEventType {
+    /// Worker was added to the pool
+    Added,
+    /// Worker was removed from the pool
+    Removed,
+    /// Worker timed out
+    Timeout,
+    /// Worker connection failed
+    ConnectionFailed,
+    /// Worker was evicted due to error
+    Evicted,
+}
+
+impl From<WorkerEventType> for Value {
+    fn from(event: WorkerEventType) -> Self {
+        match event {
+            WorkerEventType::Added => Self::from("added"),
+            WorkerEventType::Removed => Self::from("removed"),
+            WorkerEventType::Timeout => Self::from("timeout"),
+            WorkerEventType::ConnectionFailed => Self::from("connection_failed"),
+            WorkerEventType::Evicted => Self::from("evicted"),
+        }
+    }
+}
+
+/// Worker state types for metrics classification.
+#[derive(Debug, Clone, Copy)]
+pub enum WorkerState {
+    /// Worker is available and can accept work
+    Available,
+    /// Worker is paused (backpressure)
+    Paused,
+    /// Worker is draining (not accepting new work)
+    Draining,
+}
+
+impl From<WorkerState> for Value {
+    fn from(state: WorkerState) -> Self {
+        match state {
+            WorkerState::Available => Self::from("available"),
+            WorkerState::Paused => Self::from("paused"),
+            WorkerState::Draining => Self::from("draining"),
+        }
+    }
+}
+
+/// Pre-allocated attribute combinations for efficient worker metrics collection.
+#[derive(Debug)]
+pub struct WorkerMetricAttrs {
+    added: Vec<KeyValue>,
+    removed: Vec<KeyValue>,
+    timeout: Vec<KeyValue>,
+    connection_failed: Vec<KeyValue>,
+    evicted: Vec<KeyValue>,
+    state_available: Vec<KeyValue>,
+    state_paused: Vec<KeyValue>,
+    state_draining: Vec<KeyValue>,
+}
+
+impl WorkerMetricAttrs {
+    #[must_use]
+    pub fn new(base_attrs: &[KeyValue]) -> Self {
+        let make_event_attrs = |event: WorkerEventType| {
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(KeyValue::new(WORKER_EVENT_TYPE, event));
+            attrs
+        };
+
+        let make_state_attrs = |state: WorkerState| {
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(KeyValue::new(WORKER_STATE, state));
+            attrs
+        };
+
+        Self {
+            added: make_event_attrs(WorkerEventType::Added),
+            removed: make_event_attrs(WorkerEventType::Removed),
+            timeout: make_event_attrs(WorkerEventType::Timeout),
+            connection_failed: make_event_attrs(WorkerEventType::ConnectionFailed),
+            evicted: make_event_attrs(WorkerEventType::Evicted),
+            state_available: make_state_attrs(WorkerState::Available),
+            state_paused: make_state_attrs(WorkerState::Paused),
+            state_draining: make_state_attrs(WorkerState::Draining),
+        }
+    }
+
+    #[must_use]
+    pub fn added(&self) -> &[KeyValue] {
+        &self.added
+    }
+    #[must_use]
+    pub fn removed(&self) -> &[KeyValue] {
+        &self.removed
+    }
+    #[must_use]
+    pub fn timeout(&self) -> &[KeyValue] {
+        &self.timeout
+    }
+    #[must_use]
+    pub fn connection_failed(&self) -> &[KeyValue] {
+        &self.connection_failed
+    }
+    #[must_use]
+    pub fn evicted(&self) -> &[KeyValue] {
+        &self.evicted
+    }
+    #[must_use]
+    pub fn state_available(&self) -> &[KeyValue] {
+        &self.state_available
+    }
+    #[must_use]
+    pub fn state_paused(&self) -> &[KeyValue] {
+        &self.state_paused
+    }
+    #[must_use]
+    pub fn state_draining(&self) -> &[KeyValue] {
+        &self.state_draining
+    }
+}
+
+/// Global worker pool metrics instruments.
+pub static WORKER_METRICS: LazyLock<WorkerPoolMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    WorkerPoolMetrics {
+        worker_count: meter
+            .u64_gauge("worker_pool_count")
+            .with_description("Current number of workers in the pool")
+            .with_unit("{worker}")
+            .build(),
+
+        worker_events: meter
+            .u64_counter("worker_pool_events")
+            .with_description("Total worker pool events by type")
+            .with_unit("{event}")
+            .build(),
+
+        worker_actions_running: meter
+            .u64_gauge("worker_pool_actions_running")
+            .with_description("Current number of actions running on workers")
+            .with_unit("{action}")
+            .build(),
+
+        worker_actions_dispatched: meter
+            .u64_counter("worker_pool_actions_dispatched")
+            .with_description("Total number of actions dispatched to workers")
+            .with_unit("{action}")
+            .build(),
+
+        worker_actions_completed: meter
+            .u64_counter("worker_pool_actions_completed")
+            .with_description("Total number of actions completed on workers")
+            .with_unit("{action}")
+            .build(),
+
+        worker_dispatch_failures: meter
+            .u64_counter("worker_pool_dispatch_failures")
+            .with_description("Total number of action dispatch failures")
+            .with_unit("{failure}")
+            .build(),
+    }
+});
+
+/// OpenTelemetry metrics instruments for worker pool monitoring.
+#[derive(Debug)]
+pub struct WorkerPoolMetrics {
+    /// Current number of workers in the pool
+    pub worker_count: metrics::Gauge<u64>,
+    /// Counter of worker events by type
+    pub worker_events: metrics::Counter<u64>,
+    /// Current number of actions running on workers
+    pub worker_actions_running: metrics::Gauge<u64>,
+    /// Counter of actions dispatched to workers
+    pub worker_actions_dispatched: metrics::Counter<u64>,
+    /// Counter of actions completed on workers
+    pub worker_actions_completed: metrics::Counter<u64>,
+    /// Counter of action dispatch failures
+    pub worker_dispatch_failures: metrics::Counter<u64>,
 }

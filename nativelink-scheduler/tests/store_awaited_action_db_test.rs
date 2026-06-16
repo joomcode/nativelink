@@ -112,6 +112,13 @@ impl SchedulerStore for FakeSchedulerStore {
     {
         todo!()
     }
+
+    async fn count_by_index<K>(&self, _index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send,
+    {
+        todo!()
+    }
 }
 
 #[nativelink_test]
@@ -272,6 +279,13 @@ impl SchedulerStore for EventuallyVisibleStore {
     ) -> Result<Option<<K as SchedulerStoreDecodeTo>::DecodeOutput>, Error>
     where
         K: SchedulerStoreKeyProvider + SchedulerStoreDecodeTo + Send,
+    {
+        todo!("not exercised by try_subscribe")
+    }
+
+    async fn count_by_index<K>(&self, _index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send,
     {
         todo!("not exercised by try_subscribe")
     }

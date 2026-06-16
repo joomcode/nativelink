@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -68,7 +69,7 @@ pub struct CacheLookupScheduler {
     /// The "real" scheduler to use to perform actions if they were not found
     /// in the action cache.
     #[metric(group = "action_scheduler")]
-    action_scheduler: Arc<dyn KnownPlatformPropertyProvider>,
+    pub action_scheduler: Arc<dyn KnownPlatformPropertyProvider>,
     /// Actions that are currently performing a `CacheCheck`.
     inflight_cache_checks: Arc<Mutex<CheckActions>>,
 }
@@ -378,6 +379,10 @@ impl ClientStateManager for CacheLookupScheduler {
         filter: OperationFilter,
     ) -> Result<ActionStateResultStream, Error> {
         self.inner_filter_operations(filter).await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

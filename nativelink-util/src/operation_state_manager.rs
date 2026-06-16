@@ -111,6 +111,9 @@ pub trait ClientStateManager: Sync + Send + Unpin + MetricsComponent + 'static {
         &self,
         filter: OperationFilter,
     ) -> Result<ActionStateResultStream, Error>;
+
+    /// Returns the implementation as `Any` so that it can be downcast to a concrete type.
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// The type of update to perform on an operation.

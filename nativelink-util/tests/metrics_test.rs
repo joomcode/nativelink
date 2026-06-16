@@ -15,7 +15,7 @@
 use nativelink_util::action_messages::{ActionResult, ActionStage};
 use nativelink_util::metrics::{
     CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage,
-    make_execution_attributes,
+    WORKER_METRICS, make_execution_attributes,
 };
 use opentelemetry::KeyValue;
 
@@ -51,8 +51,8 @@ fn test_cache_metric_attrs() {
 #[test]
 fn test_execution_metric_attrs() {
     let base_attrs = vec![
-        KeyValue::new("execution.instance", "test_instance"),
-        KeyValue::new("execution.worker_id", "worker_123"),
+        KeyValue::new("execution_instance", "test_instance"),
+        KeyValue::new("execution_worker_id", "worker_123"),
     ];
 
     let attrs = ExecutionMetricAttrs::new(&base_attrs);
@@ -61,12 +61,12 @@ fn test_execution_metric_attrs() {
     let queued_attrs = attrs.queued();
     assert_eq!(queued_attrs.len(), 3);
     assert!(queued_attrs.iter().any(
-        |kv| kv.key.as_str() == "execution.instance" && kv.value.to_string() == "test_instance"
+        |kv| kv.key.as_str() == "execution_instance" && kv.value.to_string() == "test_instance"
     ));
     assert!(
         queued_attrs
             .iter()
-            .any(|kv| kv.key.as_str() == "execution.stage" && kv.value.to_string() == "queued")
+            .any(|kv| kv.key.as_str() == "execution_stage" && kv.value.to_string() == "queued")
     );
 
     let completed_success_attrs = attrs.completed_success();
@@ -74,12 +74,12 @@ fn test_execution_metric_attrs() {
     assert!(
         completed_success_attrs
             .iter()
-            .any(|kv| kv.key.as_str() == "execution.stage" && kv.value.to_string() == "completed")
+            .any(|kv| kv.key.as_str() == "execution_stage" && kv.value.to_string() == "completed")
     );
     assert!(
         completed_success_attrs
             .iter()
-            .any(|kv| kv.key.as_str() == "execution.result" && kv.value.to_string() == "success")
+            .any(|kv| kv.key.as_str() == "execution_result" && kv.value.to_string() == "success")
     );
 }
 
@@ -89,18 +89,18 @@ fn test_make_execution_attributes() {
 
     assert_eq!(attrs.len(), 3);
     assert!(attrs.iter().any(
-        |kv| kv.key.as_str() == "execution.instance" && kv.value.to_string() == "test_instance"
+        |kv| kv.key.as_str() == "execution_instance" && kv.value.to_string() == "test_instance"
     ));
     assert!(
         attrs
             .iter()
-            .any(|kv| kv.key.as_str() == "execution.worker_id"
+            .any(|kv| kv.key.as_str() == "execution_worker_id"
                 && kv.value.to_string() == "worker_456")
     );
     assert!(
         attrs
             .iter()
-            .any(|kv| kv.key.as_str() == "execution.priority"
+            .any(|kv| kv.key.as_str() == "execution_priority"
                 && kv.value == opentelemetry::Value::I64(100))
     );
 }
@@ -110,6 +110,7 @@ fn test_metrics_lazy_initialization() {
     // Verify that the lazy static initialization works
     let _cache_metrics = &*CACHE_METRICS;
     let _execution_metrics = &*EXECUTION_METRICS;
+    let _worker_metrics = &*WORKER_METRICS;
 
     // If we got here without panicking, the metrics were initialized successfully
 }
