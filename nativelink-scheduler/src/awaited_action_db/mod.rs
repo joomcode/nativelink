@@ -15,6 +15,7 @@
 use core::cmp;
 use core::ops::Bound;
 use core::time::Duration;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use awaited_action::{AwaitedAction, AwaitedActionSortKey};
@@ -47,6 +48,17 @@ impl TryFrom<&ActionStage> for SortedAwaitedActionState {
             ActionStage::Completed(_) => Ok(Self::Completed),
             ActionStage::Queued => Ok(Self::Queued),
             _ => Err(make_input_err!("Invalid State")),
+        }
+    }
+}
+
+impl TryFrom<&CountableActionStage> for SortedAwaitedActionState {
+    type Error = Error;
+    fn try_from(value: &CountableActionStage) -> Result<Self, Error> {
+        match value {
+            CountableActionStage::Queued => Ok(Self::Queued),
+            CountableActionStage::Executing => Ok(Self::Executing),
+            CountableActionStage::Completed => Ok(Self::Completed),
         }
     }
 }
@@ -140,6 +152,13 @@ pub trait AwaitedActionSubscriber: Send + Sync + Sized + 'static {
     fn borrow(&self) -> impl Future<Output = Result<AwaitedAction, Error>> + Send;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CountableActionStage {
+    Queued,
+    Executing,
+    Completed,
+}
+
 /// A trait that defines the interface for an `AwaitedActionDb`.
 pub trait AwaitedActionDb: Send + Sync + MetricsComponent + Unpin + 'static {
     type Subscriber: AwaitedActionSubscriber;
@@ -173,6 +192,15 @@ pub trait AwaitedActionDb: Send + Sync + MetricsComponent + Unpin + 'static {
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<Self::Subscriber, Error>> + Send, Error>,
     > + Send;
+
+    fn get_queued_actions(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Arc<AwaitedAction>>, Error>> + Send;
+
+    fn count_actions(
+        &self,
+        states: Vec<CountableActionStage>,
+    ) -> impl Future<Output = Result<HashMap<CountableActionStage, usize>, Error>> + Send;
 
     /// Process a change changed `AwaitedAction` and notify any listeners.
     fn update_awaited_action(
