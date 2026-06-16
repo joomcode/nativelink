@@ -1900,6 +1900,13 @@ where
 {
     type SubscriptionManager = RedisSubscriptionManager;
 
+    async fn count_by_index<K>(&self, index: Vec<K>) -> Result<Vec<usize>, Error>
+    where
+        K: SchedulerIndexProvider + Send,
+    {
+        Err(make_err!(Code::Unimplemented, "Not implemented"))
+    }
+
     async fn subscription_manager(&self) -> Result<Arc<RedisSubscriptionManager>, Error> {
         if self.pub_sub_channel.is_none() {
             return Err(make_input_err!(

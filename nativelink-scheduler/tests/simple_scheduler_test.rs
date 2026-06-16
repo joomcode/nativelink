@@ -39,8 +39,8 @@ use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::
     ActionResourceUsage, ConnectionResult, StartExecute, UpdateForWorker, update_for_worker,
 };
 use nativelink_scheduler::awaited_action_db::{
-    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, SortedAwaitedAction,
-    SortedAwaitedActionState,
+    AwaitedAction, AwaitedActionDb, AwaitedActionSubscriber, CountableActionStage,
+    SortedAwaitedAction, SortedAwaitedActionState,
 };
 use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
 use nativelink_scheduler::simple_scheduler::SimpleScheduler;
@@ -1147,6 +1147,10 @@ impl AwaitedActionDb for RxMockAwaitedAction {
             .expect("Could not receive msg in mpsc")
     }
 
+    async fn get_queued_actions(&self) -> Result<Vec<Arc<AwaitedAction>>, Error> {
+        Ok(vec![])
+    }
+
     async fn get_range_of_actions(
         &self,
         _state: SortedAwaitedActionState,
@@ -1175,6 +1179,13 @@ impl AwaitedActionDb for RxMockAwaitedAction {
         _no_event_action_timeout: Duration,
     ) -> Result<Self::Subscriber, Error> {
         unreachable!();
+    }
+
+    async fn count_actions(
+        &self,
+        _states: Vec<CountableActionStage>,
+    ) -> Result<HashMap<CountableActionStage, usize>, Error> {
+        Ok(HashMap::default())
     }
 }
 
@@ -2437,6 +2448,7 @@ async fn action_timeout_is_enforced_backend_side_test() -> Result<(), Error> {
         ),
         MockInstantWrapped::default,
         /* worker_registry */ None,
+        /* instance_name */ "test_scheduler",
     );
 
     assert!(
