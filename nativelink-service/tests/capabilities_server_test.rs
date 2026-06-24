@@ -24,10 +24,10 @@ use nativelink_proto::build::bazel::remote::execution::v2::capabilities_server::
 use nativelink_proto::build::bazel::remote::execution::v2::{
     GetCapabilitiesRequest, ServerCapabilities, compressor,
 };
-use nativelink_scheduler::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_scheduler::mock_scheduler::MockActionScheduler;
 use nativelink_service::capabilities_server::CapabilitiesServer;
 use nativelink_service::wire_compression::RemoteCacheCompressionInstances;
+use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use pretty_assertions::assert_eq;
 use tonic::Request;
 

@@ -115,6 +115,7 @@ impl GrpcScheduler {
                 spec.max_concurrent_requests,
                 spec.retry.clone(),
                 jitter_fn,
+                spec.load_balanced_channel,
             ),
         })
     }
