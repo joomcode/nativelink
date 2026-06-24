@@ -38,6 +38,8 @@ use nativelink_util::buf_channel::{
     DropCloserReadHalf, DropCloserWriteHalf, make_buf_channel_pair,
 };
 use nativelink_util::common::{DigestInfo, fs};
+#[cfg(unix)]
+use nativelink_util::evicting_map::NoopRemove;
 use nativelink_util::evicting_map::{EvictingMap, EvictionSnapshot, LenEntry};
 use nativelink_util::fs::FileSlot;
 use nativelink_util::health_utils::{HealthRegistryBuilder, HealthStatus, HealthStatusIndicator};
@@ -478,6 +480,58 @@ const SIMULTANEOUS_METADATA_READS: usize = 200;
 type FsEvictingMap<'a, Fe> =
     EvictingMap<StoreKeyBorrow, StoreKey<'a>, Arc<Fe>, SystemTime, RemoveItemCallbackHolder>;
 
+/// Eviction entry for a per-digest executable variant living in
+/// `{content_path}.exec`. Unlike CAS blobs, a variant is never handed out as a
+/// long-lived `Arc` to readers — the worker resolves its path and hardlinks it
+/// immediately — so eviction can simply delete the file from disk (the
+/// already-created hardlinks keep the inode alive). The variant is regenerable,
+/// so a failed delete only wastes disk until the next startup wipe.
+#[cfg(unix)]
+#[derive(Debug)]
+struct ExecutableVariantEntry {
+    /// Full path of the `0o555` variant file.
+    path: OsString,
+    /// Block-aligned size on disk, used for eviction accounting. Mirrors the
+    /// CAS `FileEntry::size_on_disk` so both maps account bytes the same way.
+    size_on_disk: u64,
+}
+
+#[cfg(unix)]
+impl LenEntry for ExecutableVariantEntry {
+    #[inline]
+    fn len(&self) -> u64 {
+        self.size_on_disk
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.size_on_disk == 0
+    }
+
+    #[inline]
+    async fn unref(&self) {
+        // The map has already debited this entry's bytes; reclaim the disk in
+        // the background so eviction doesn't block on filesystem I/O.
+        let path = self.path.clone();
+        background_spawn!("filesystem_delete_exec_variant", async move {
+            match fs::remove_file(&path).await {
+                Ok(()) => debug!(?path, "Executable variant deleted"),
+                // Already gone is the desired end state of a delete.
+                Err(err) if err.code == Code::NotFound => {
+                    debug!(?path, "Executable variant already gone");
+                }
+                Err(err) => error!(?path, ?err, "Failed to delete executable variant"),
+            }
+        });
+    }
+}
+
+/// LRU eviction map for executable variants, keyed by the blob's
+/// [`DigestInfo`]. Enabled only when `executable_eviction_policy` is set.
+#[cfg(unix)]
+type ExecutableEvictingMap =
+    EvictingMap<DigestInfo, DigestInfo, Arc<ExecutableVariantEntry>, SystemTime, NoopRemove>;
+
 async fn add_files_to_cache<Fe: FileEntry>(
     evicting_map: &FsEvictingMap<'_, Fe>,
     anchor_time: &SystemTime,
@@ -806,6 +860,12 @@ pub struct FilesystemStore<Fe: FileEntry = FileEntryImpl> {
     /// get/insert/remove the per-digest async lock — never across I/O.
     #[cfg(unix)]
     executable_locks: std::sync::Mutex<HashMap<DigestInfo, Arc<Mutex<()>>>>,
+    /// LRU eviction map for the `{content_path}.exec` variants. `None` (the
+    /// default) leaves variants untracked and only reclaimed by the startup
+    /// wipe; `Some` tracks every variant against `executable_eviction_policy`
+    /// and deletes it from disk when evicted.
+    #[cfg(unix)]
+    executable_evicting_map: Option<Arc<ExecutableEvictingMap>>,
 }
 
 impl<Fe: FileEntry> FilesystemStore<Fe> {
@@ -831,6 +891,15 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         let empty_policy = nativelink_config::stores::EvictionPolicy::default();
         let eviction_policy = spec.eviction_policy.as_ref().unwrap_or(&empty_policy);
         let evicting_map = Arc::new(EvictingMap::new(eviction_policy, now));
+
+        // Optional dedicated eviction map for the executable variants. Off by
+        // default; when configured, variants count against their own policy and
+        // are deleted from disk LRU-style instead of growing until restart.
+        #[cfg(unix)]
+        let executable_evicting_map = spec
+            .executable_eviction_policy
+            .as_ref()
+            .map(|policy| Arc::new(EvictingMap::new(policy, now)));
 
         // Create temp and content directories and the s and d subdirectories.
 
@@ -893,6 +962,8 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             write_semaphore,
             #[cfg(unix)]
             executable_locks: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(unix)]
+            executable_evicting_map,
         }))
     }
 
@@ -936,6 +1007,12 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         // Fast path: the variant already exists, so the caller can hardlink it
         // with no writable fd anywhere in sight.
         if fs::metadata(&variant_path).await.is_ok() {
+            // Refresh LRU recency so an actively-reused variant is not the
+            // eviction victim of a concurrent insert. No-op when eviction is
+            // disabled or the entry was already reaped.
+            if let Some(map) = &self.executable_evicting_map {
+                map.get(digest).await;
+            }
             return Ok(variant_path);
         }
 
@@ -958,6 +1035,9 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         // Re-check: another task may have constructed it while we waited.
         if fs::metadata(&variant_path).await.is_ok() {
             self.forget_executable_lock(digest);
+            if let Some(map) = &self.executable_evicting_map {
+                map.get(digest).await;
+            }
             return Ok(variant_path);
         }
 
@@ -965,7 +1045,23 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         // Drop the per-digest lock entry regardless of outcome so the map
         // cannot grow unbounded; a concurrent waiter already cloned the Arc.
         self.forget_executable_lock(digest);
-        result.map(|()| variant_path)
+        let size_on_disk = result?;
+        // Track the freshly-created variant so it counts against the
+        // executable eviction policy and gets reclaimed LRU-style. Inserting
+        // here (after the single-flight guard) means each variant is accounted
+        // exactly once. When eviction is disabled the variant is left untracked
+        // and only the startup wipe reclaims it (historical behavior).
+        if let Some(map) = &self.executable_evicting_map {
+            map.insert(
+                *digest,
+                Arc::new(ExecutableVariantEntry {
+                    path: variant_path.clone(),
+                    size_on_disk,
+                }),
+            )
+            .await;
+        }
+        Ok(variant_path)
     }
 
     /// Non-unix has no executable bit and no `ETXTBSY`, so just hardlink the
@@ -990,19 +1086,23 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
     }
 
     /// Materializes the 0o555 executable variant for `digest`. Must be called
-    /// under the per-digest single-flight guard.
+    /// under the per-digest single-flight guard. Returns the block-aligned size
+    /// of the variant on disk so the caller can account it for eviction.
     #[cfg(unix)]
     async fn create_executable_variant(
         &self,
         digest: &DigestInfo,
         variant_path: &OsStr,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         // Resolve the on-disk CAS blob (0o444) to copy from. Must be present in
         // this tier; callers populate the fast store first.
         let file_entry = self
             .get_file_entry_for_digest(digest)
             .await
             .err_tip(|| "Resolving CAS blob for executable variant")?;
+        // The variant is a byte-for-byte copy of the blob, so it occupies the
+        // same block-aligned footprint on disk.
+        let size_on_disk = file_entry.size_on_disk();
         let src_path = file_entry
             .get_file_path_locked(|p| async move { Ok(p) })
             .await?;
@@ -1043,7 +1143,8 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             }
         )
         .await
-        .err_tip(|| "executable-variant spawn_blocking join failed")?
+        .err_tip(|| "executable-variant spawn_blocking join failed")??;
+        Ok(size_on_disk)
     }
 
     pub async fn get_file_entry_for_digest(&self, digest: &DigestInfo) -> Result<Arc<Fe>, Error> {
