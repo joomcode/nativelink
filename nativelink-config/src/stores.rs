@@ -1439,6 +1439,10 @@ pub struct GrpcSpec {
     /// context (`traceparent` / `tracestate`) into every outgoing request.
     #[serde(default)]
     pub forward_headers: Vec<String>,
+
+    /// Default: false
+    #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
+    pub load_balanced_channel: bool,
 }
 
 /// The possible error codes that might occur on an upstream request.
