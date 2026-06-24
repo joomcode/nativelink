@@ -55,6 +55,7 @@ fn test_spec<T: Into<String>>(endpoint: T, use_legacy_resource_names: bool) -> G
         use_legacy_resource_names,
         headers: HashMap::new(),
         forward_headers: vec![],
+        load_balanced_channel: false,
     }
 }
 

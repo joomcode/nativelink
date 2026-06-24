@@ -31,6 +31,9 @@ use tonic::body::Body;
 use tower::{Service, ServiceBuilder, ServiceExt};
 use tracing::{debug, error, warn};
 
+mod dns_utils;
+use dns_utils::dns_configured;
+
 struct ExtractClientHeaders(ClientHeaders);
 
 impl<S> FromRequestParts<S> for ExtractClientHeaders
@@ -169,17 +172,6 @@ async fn oltp_logs_with_headers() -> Result<(), Box<dyn core::error::Error>> {
     assert_eq!(client_header.0.get("foo"), Some(&"bar".to_string()));
 
     Ok(())
-}
-
-// ginepro's default resolver (hickory-dns) reads /etc/resolv.conf, which
-// doesn't exist in sandboxed environments (e.g. Nix builds).
-#[cfg(unix)]
-fn dns_configured() -> bool {
-    std::path::Path::new("/etc/resolv.conf").exists()
-}
-#[cfg(not(unix))]
-const fn dns_configured() -> bool {
-    true
 }
 
 // Resolves a host:port pair by parsing the host as a literal IP address,
