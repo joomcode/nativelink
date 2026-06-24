@@ -2934,6 +2934,17 @@ impl<A: AwaitedActionDb> AwaitedActionDb for QueuedSearchSuppressingDb<A> {
         Ok(futures::stream::iter(items))
     }
 
+    async fn get_queued_actions(&self) -> Result<Vec<Arc<AwaitedAction>>, Error> {
+        self.inner.get_queued_actions().await
+    }
+
+    async fn count_actions(
+        &self,
+        states: Vec<CountableActionStage>,
+    ) -> Result<HashMap<CountableActionStage, usize>, Error> {
+        self.inner.count_actions(states).await
+    }
+
     async fn update_awaited_action(&self, new_awaited_action: AwaitedAction) -> Result<(), Error> {
         self.inner.update_awaited_action(new_awaited_action).await
     }

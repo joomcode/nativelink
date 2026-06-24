@@ -1556,6 +1556,10 @@ pub struct GrpcSpec {
     #[serde(default)]
     pub experimental_read_batching: Option<GrpcReadBatchingConfig>,
 
+    /// Default: false
+    #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
+    pub load_balanced_channel: bool,
+
     /// Compress this store's own blob transfers on the wire with REAPI
     /// `compressed-blobs/zstd`. Uploads and full-blob downloads of blobs at
     /// or above 64 KiB are zstd-compressed; smaller blobs and ranged reads

@@ -305,6 +305,7 @@ impl GrpcStore {
                 spec.max_concurrent_requests,
                 spec.retry.clone(),
                 jitter_fn,
+                spec.load_balanced_channel,
             ),
             rpc_timeout,
             use_legacy_resource_names: spec.use_legacy_resource_names,

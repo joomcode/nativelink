@@ -278,6 +278,7 @@ async fn make_fixture(read_batching: Option<GrpcReadBatchingConfig>) -> Result<T
         forward_headers: vec![],
         experimental_read_batching: read_batching,
         experimental_remote_cache_compression: Some(false),
+        load_balanced_channel: false,
     };
     let store = GrpcStore::new(&spec).await?;
     Ok(TestFixture {
@@ -565,6 +566,7 @@ async fn forward_headers_with_batching_rejected() -> Result<(), Error> {
         forward_headers: vec!["authorization".to_string()],
         experimental_read_batching: Some(batching_config()),
         experimental_remote_cache_compression: Some(false),
+        load_balanced_channel: false,
     };
     let err = GrpcStore::new(&spec)
         .await
