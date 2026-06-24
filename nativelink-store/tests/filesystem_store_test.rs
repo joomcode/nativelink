@@ -1663,6 +1663,110 @@ async fn executable_hardlink_source_created_once_and_readonly() -> Result<(), Er
     Ok(())
 }
 
+/// With `executable_eviction_policy` unset (the default), executable variants
+/// are never reclaimed at runtime — they only count against the directory wipe
+/// on the next startup. This is the historical behavior the eviction feature
+/// must preserve when off.
+#[cfg(target_family = "unix")]
+#[nativelink_test]
+async fn executable_variants_not_evicted_without_policy() -> Result<(), Error> {
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    let digest1 = DigestInfo::try_new(HASH1, VALUE1.len())?;
+    let digest2 = DigestInfo::try_new(HASH2, VALUE2.len())?;
+
+    let store = Box::pin(
+        FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+            content_path: content_path.clone(),
+            temp_path: temp_path.clone(),
+            executable_eviction_policy: None,
+            ..Default::default()
+        })
+        .await?,
+    );
+    store.update_oneshot(digest1, VALUE1.into()).await?;
+    store.update_oneshot(digest2, VALUE2.into()).await?;
+
+    let exec1 = store.get_executable_hardlink_source(&digest1).await?;
+    let exec2 = store.get_executable_hardlink_source(&digest2).await?;
+
+    // Neither variant is tracked for eviction, so both remain on disk
+    // regardless of how many are materialized.
+    assert!(
+        fs::metadata(&exec1).await.is_ok(),
+        "first variant must survive when eviction is disabled"
+    );
+    assert!(
+        fs::metadata(&exec2).await.is_ok(),
+        "second variant must survive when eviction is disabled"
+    );
+
+    Ok(())
+}
+
+/// With `executable_eviction_policy` set, executable variants are tracked in a
+/// dedicated LRU map and deleted from disk when they fall out of the policy —
+/// independently of the main content cache. Here `max_count: 1` forces the
+/// least-recently-used variant to be reclaimed when a second one is created.
+#[cfg(target_family = "unix")]
+#[nativelink_test]
+async fn executable_variants_evicted_with_policy() -> Result<(), Error> {
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    let digest1 = DigestInfo::try_new(HASH1, VALUE1.len())?;
+    let digest2 = DigestInfo::try_new(HASH2, VALUE2.len())?;
+
+    let store = Box::pin(
+        FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+            content_path: content_path.clone(),
+            temp_path: temp_path.clone(),
+            executable_eviction_policy: Some(EvictionPolicy {
+                max_count: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?,
+    );
+    store.update_oneshot(digest1, VALUE1.into()).await?;
+    store.update_oneshot(digest2, VALUE2.into()).await?;
+
+    // Materialize the first variant, then a second. The second insert pushes
+    // the map past `max_count: 1`, evicting the first variant (LRU).
+    let exec1 = store.get_executable_hardlink_source(&digest1).await?;
+    assert!(fs::metadata(&exec1).await.is_ok(), "first variant created");
+    let exec2 = store.get_executable_hardlink_source(&digest2).await?;
+    assert!(fs::metadata(&exec2).await.is_ok(), "second variant created");
+
+    // Eviction deletes the file off the hot path (background), so poll for it.
+    let mut evicted = false;
+    for _ in 0..1000 {
+        if fs::metadata(&exec1).await.is_err() {
+            evicted = true;
+            break;
+        }
+        sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        evicted,
+        "least-recently-used variant must be deleted from disk once evicted"
+    );
+    assert!(
+        fs::metadata(&exec2).await.is_ok(),
+        "most-recently-used variant must remain on disk"
+    );
+
+    // The evicted variant is regenerable: requesting it again recreates it.
+    let exec1_again = store.get_executable_hardlink_source(&digest1).await?;
+    assert_eq!(exec1, exec1_again, "recreated variant path must be stable");
+    assert!(
+        fs::metadata(&exec1_again).await.is_ok(),
+        "variant must be recreated on demand after eviction"
+    );
+
+    Ok(())
+}
+
 /// Regression test for #2474: the `.exec` variant directory was never
 /// registered in `evicting_map`, so it was invisible to `max_bytes` and only
 /// ever cleared by the startup `remove_dir_all` — growing without bound at
