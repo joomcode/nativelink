@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use futures::Future;
 use futures::stream::{FuturesUnordered, StreamExt, unfold};
+use ginepro::LoadBalancedChannel;
 use nativelink_config::stores::Retry;
-use nativelink_error::{Code, Error, make_err};
+use nativelink_error::{Code, Error, ResultExt, make_err};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tonic::transport::{Channel, Endpoint, channel};
 use tracing::{debug, error, info, warn};
@@ -111,6 +112,8 @@ struct ConnectionManagerWorker {
     /// The retry configuration for connecting to an Endpoint, on failure will
     /// restart the retrier after a 1 second delay.
     retrier: Retrier,
+
+    balanced_channel: bool,
 }
 
 /// The maximum number of queued requests to obtain a connection from the
@@ -128,6 +131,7 @@ impl ConnectionManager {
         mut max_concurrent_requests: usize,
         retry: Retry,
         jitter_fn: retry::JitterFn,
+        balanced_channel: bool,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(WORKER_BACKLOG);
         // The connection messages always come from sync contexts (e.g. drop)
@@ -160,6 +164,7 @@ impl ConnectionManager {
                 jitter_fn,
                 retry,
             ),
+            balanced_channel,
         };
         background_spawn!("connection_manager_worker_spawn", async move {
             worker
@@ -282,18 +287,13 @@ impl ConnectionManagerWorker {
             endpoint_index,
             connection_index,
         };
+        let balanced_channel = self.balanced_channel;
         let connection_stream = unfold(endpoint.clone(), move |endpoint| async move {
-            let result = endpoint.connect().await.map_err(|err| {
-                make_err!(
-                    Code::Unavailable,
-                    "Failed to connect to {:?}: {err:?}",
-                    endpoint.uri()
-                )
-            });
-            Some((
-                result.map_or_else(RetryResult::Retry, RetryResult::Ok),
-                endpoint,
-            ))
+            if balanced_channel {
+                Self::load_balanced_channel(endpoint).await
+            } else {
+                Self::channel(endpoint).await
+            }
         });
         let retrier = self.retrier.clone();
         self.connecting_channels.push(Box::pin(async move {
@@ -306,12 +306,60 @@ impl ConnectionManagerWorker {
                 |err| Err((identifier, err)),
                 |channel| {
                     Ok(EstablishedChannel {
-                        channel,
+                        channel: channel.into(),
                         identifier,
                     })
                 },
             )
         }));
+    }
+
+    async fn channel(endpoint: Endpoint) -> Option<(RetryResult<Channel>, Endpoint)> {
+        Some((
+            endpoint
+                .connect()
+                .await
+                .map_err(|err| {
+                    make_err!(
+                        Code::Unavailable,
+                        "Failed to connect to {:?}: {err:?}",
+                        endpoint.uri()
+                    )
+                })
+                .map_or_else(RetryResult::Retry, RetryResult::Ok),
+            endpoint,
+        ))
+    }
+
+    async fn load_balanced_channel(endpoint: Endpoint) -> Option<(RetryResult<Channel>, Endpoint)> {
+        let uri = endpoint.uri();
+        let host = uri
+            .host()
+            .err_tip(|| format!("Unable to get host from endpoint {uri}"))
+            .unwrap();
+        let port = uri
+            .port()
+            .err_tip(|| format!("Unable to get port from endpoint {uri}"))
+            .unwrap()
+            .as_u16();
+
+        let result = LoadBalancedChannel::builder((host.to_string(), port))
+            .channel()
+            .await
+            .map_err(|err| {
+                make_err!(
+                    Code::Unavailable,
+                    "Failed to connect to {:?}: {err:?}",
+                    endpoint.uri()
+                )
+            });
+
+        Some((
+            result
+                .map(LoadBalancedChannel::into)
+                .map_or_else(RetryResult::Retry, RetryResult::Ok),
+            endpoint,
+        ))
     }
 
     // This must never be made async otherwise the select may cancel it.

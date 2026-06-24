@@ -1459,6 +1459,10 @@ pub struct GrpcSpec {
     /// Default: unset (disabled). When unset there is zero behavior change.
     #[serde(default)]
     pub experimental_read_batching: Option<GrpcReadBatchingConfig>,
+
+    /// Default: false
+    #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
+    pub load_balanced_channel: bool,
 }
 
 /// Configuration for experimental small-blob read coalescing in a gRPC

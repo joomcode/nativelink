@@ -102,6 +102,7 @@ rust_test_suite(
         "tests/buf_channel_test.rs",
         "tests/channel_body_for_tests_test.rs",
         "tests/common_test.rs",
+        "tests/connection_manager_test.rs",
         "tests/evicting_map_test.rs",
         "tests/fastcdc_test.rs",
         "tests/health_utils_test.rs",
@@ -115,6 +116,9 @@ rust_test_suite(
         "tests/store_trait_test.rs",
         "tests/telemetry_test.rs",
         "tests/tls_utils_test.rs",
+    ],
+    shared_srcs = [
+        "tests/dns_utils.rs",
     ],
     compile_data = [
         "tests/data/SekienAkashita.jpg",

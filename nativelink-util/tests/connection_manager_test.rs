@@ -46,6 +46,9 @@ use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Endpoint, Server};
 use tonic::{Request, Response, Status, Streaming};
 
+mod dns_utils;
+use dns_utils::dns_configured;
+
 #[derive(Clone)]
 struct FakeByteStream;
 
@@ -105,6 +108,7 @@ async fn permits_released_on_drop_no_leak() -> Result<(), Error> {
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
+        /* balanced_channel = */ false,
     );
 
     for i in 0..ITERATIONS {
@@ -132,6 +136,7 @@ async fn aborted_caller_future_does_not_leak_permits() -> Result<(), Error> {
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
+        /* balanced_channel = */ false,
     ));
 
     let mut handles = Vec::new();
@@ -142,7 +147,7 @@ async fn aborted_caller_future_does_not_leak_permits() -> Result<(), Error> {
             // task abort; bare `let _ = ...` would drop it immediately
             // and defeat the test.
             let _conn = cm.connection(format!("aborted-{i}")).await;
-            futures::future::pending::<()>().await
+            futures::future::pending::<()>().await;
         }));
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -162,6 +167,63 @@ async fn aborted_caller_future_does_not_leak_permits() -> Result<(), Error> {
 }
 
 #[nativelink_test]
+async fn unbalanced_channel_establishes_connection() -> Result<(), Error> {
+    const MAX_CONCURRENT: usize = 1;
+
+    let endpoint = fake_grpc_server_endpoint().await;
+    let cm = ConnectionManager::new(
+        vec![endpoint],
+        MAX_CONCURRENT,
+        MAX_CONCURRENT,
+        Retry::default(),
+        no_jitter(),
+        /* balanced_channel = */ false,
+    );
+
+    // With `balanced_channel = false` the worker uses the direct
+    // `Endpoint::connect` path; acquiring a connection within the timeout
+    // proves that branch produces a usable channel.
+    let conn = timeout(Duration::from_secs(5), cm.connection("unbalanced".into()))
+        .await
+        .expect("acquire blocked >5s — direct connect path did not produce a channel")?;
+    drop(conn);
+    Ok(())
+}
+
+#[nativelink_test]
+async fn balanced_channel_establishes_connection() -> Result<(), Error> {
+    const MAX_CONCURRENT: usize = 1;
+
+    // The load-balanced channel needs ginepro's default DNS resolver.
+    if !dns_configured() {
+        eprintln!(
+            "Skipping balanced_channel_establishes_connection: no DNS configuration \
+             available (e.g. sandboxed Nix build)"
+        );
+        return Ok(());
+    }
+
+    let endpoint = fake_grpc_server_endpoint().await;
+    let cm = ConnectionManager::new(
+        vec![endpoint],
+        MAX_CONCURRENT,
+        MAX_CONCURRENT,
+        Retry::default(),
+        no_jitter(),
+        /* balanced_channel = */ true,
+    );
+
+    // With `balanced_channel = true` the worker uses the ginepro
+    // `LoadBalancedChannel` path; acquiring a connection within the timeout
+    // proves that branch resolves the endpoint and produces a usable channel.
+    let conn = timeout(Duration::from_secs(5), cm.connection("balanced".into()))
+        .await
+        .expect("acquire blocked >5s — load-balanced path did not produce a channel")?;
+    drop(conn);
+    Ok(())
+}
+
+#[nativelink_test]
 async fn extra_request_above_max_blocks_until_a_release() -> Result<(), Error> {
     const MAX_CONCURRENT: usize = 2;
 
@@ -172,6 +234,7 @@ async fn extra_request_above_max_blocks_until_a_release() -> Result<(), Error> {
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
+        /* balanced_channel = */ false,
     ));
 
     let c1 = cm.connection("hold-1".into()).await?;
