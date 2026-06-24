@@ -764,6 +764,27 @@ pub struct FilesystemSpec {
     /// Default: false
     #[serde(default)]
     pub evict_page_cache: bool,
+
+    /// Policy used to evict per-digest **executable variants** — the read-only
+    /// `0o555` copies materialized in the sibling `{content_path}.exec`
+    /// directory so executable inputs can be hardlinked without mutating the
+    /// shared `0o444` CAS blob (see the `FilesystemStore` executable-variant
+    /// path).
+    ///
+    /// These variants are *not* accounted for by `eviction_policy`, which only
+    /// governs `content_path`. Left unmanaged they grow on disk roughly in
+    /// step with the executable portion of the CAS and are only reclaimed when
+    /// the directory is wiped on the next startup, which can fill the disk on
+    /// long-lived workers.
+    ///
+    /// When unset (the default) the variants are never evicted at runtime,
+    /// preserving the historical behavior. When set, each variant is tracked in
+    /// a dedicated eviction map and deleted from disk LRU-style against this
+    /// policy, independently of the main content cache.
+    ///
+    /// Unix-only; ignored on other platforms (no executable bit, no variants).
+    /// Default: unset (no runtime eviction).
+    pub executable_eviction_policy: Option<EvictionPolicy>,
 }
 
 // NetApp ONTAP S3 Spec
