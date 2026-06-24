@@ -19,8 +19,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::serde_utils::{
-    convert_duration_with_shellexpand, convert_duration_with_shellexpand_and_negative,
-    convert_numeric_with_shellexpand, convert_string_with_shellexpand,
+    convert_boolean_with_shellexpand, convert_duration_with_shellexpand,
+    convert_duration_with_shellexpand_and_negative, convert_numeric_with_shellexpand,
+    convert_string_with_shellexpand,
 };
 use crate::stores::{GrpcEndpoint, Retry, StoreRefName};
 
@@ -468,6 +469,10 @@ pub struct GrpcSpec {
     /// build metadata) are always forwarded.
     #[serde(default)]
     pub forward_headers: Vec<String>,
+
+    /// Default: false
+    #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
+    pub load_balanced_channel: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

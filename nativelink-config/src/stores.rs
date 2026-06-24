@@ -1726,6 +1726,10 @@ pub struct GrpcSpec {
         deserialize_with = "convert_boolean_with_shellexpand"
     )]
     pub experimental_remote_cache_compression: Option<bool>,
+
+    /// Default: false
+    #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
+    pub load_balanced_channel: bool,
 }
 
 impl GrpcSpec {
