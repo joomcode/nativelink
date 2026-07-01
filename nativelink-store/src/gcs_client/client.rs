@@ -17,6 +17,7 @@ use core::future::Future;
 use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 use futures::Stream;
@@ -26,6 +27,7 @@ use gcloud_storage::http::Error as GcsError;
 use gcloud_storage::http::objects::Object;
 use gcloud_storage::http::objects::download::Range;
 use gcloud_storage::http::objects::get::GetObjectRequest;
+use gcloud_storage::http::objects::patch::PatchObjectRequest;
 use gcloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
 use gcloud_storage::http::resumable_upload_client::{ChunkSize, UploadStatus};
 use nativelink_config::stores::ExperimentalGcsSpec;
@@ -99,6 +101,16 @@ pub trait GcsOperations: Send + Sync + Debug {
         &self,
         object_path: &ObjectPath,
     ) -> impl Future<Output = Result<bool, Error>> + Send;
+
+    /// Update the `customTime` metadata of an existing object to the provided
+    /// Unix timestamp (in seconds). Used for "recently last used" tracking so
+    /// that a `daysSinceCustomTime` bucket lifecycle rule can evict objects
+    /// that have not been read recently.
+    fn update_object_custom_time(
+        &self,
+        object_path: &ObjectPath,
+        custom_time_unix_secs: i64,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Main client for interacting with Google Cloud Storage
@@ -220,6 +232,11 @@ impl GcsClient {
             nanos: 0,
         });
 
+        let custom_time = obj.custom_time.map(|dt| Timestamp {
+            seconds: dt.unix_timestamp(),
+            nanos: 0,
+        });
+
         GcsObject {
             name: obj.name,
             bucket: obj.bucket,
@@ -228,6 +245,7 @@ impl GcsClient {
                 .content_type
                 .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string()),
             update_time,
+            custom_time,
         }
     }
 
@@ -608,5 +626,42 @@ impl GcsOperations for GcsClient {
     async fn object_exists(&self, object_path: &ObjectPath) -> Result<bool, Error> {
         let metadata = self.read_object_metadata(object_path).await?;
         Ok(metadata.is_some())
+    }
+
+    async fn update_object_custom_time(
+        &self,
+        object_path: &ObjectPath,
+        custom_time_unix_secs: i64,
+    ) -> Result<(), Error> {
+        self.with_connection(|| async {
+            // `customTime` must be a wall-clock instant. A negative Unix
+            // timestamp is nonsensical here, so clamp it to the epoch.
+            let custom_time =
+                UNIX_EPOCH + Duration::from_secs(u64::try_from(custom_time_unix_secs).unwrap_or(0));
+
+            // Only `custom_time` is populated; every other field on `Object`
+            // is `skip_serializing_if`-guarded at its default, so the PATCH
+            // body contains just `customTime` and will not clobber immutable
+            // server-managed fields.
+            let metadata = Object {
+                custom_time: Some(custom_time.into()),
+                ..Default::default()
+            };
+
+            let request = PatchObjectRequest {
+                bucket: object_path.bucket.clone(),
+                object: object_path.path.clone(),
+                metadata: Some(metadata),
+                ..Default::default()
+            };
+
+            self.client
+                .patch_object(&request)
+                .await
+                .map_err(|e| Self::handle_gcs_error(&e))?;
+
+            Ok(())
+        })
+        .await
     }
 }
