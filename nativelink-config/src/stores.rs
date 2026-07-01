@@ -1222,6 +1222,35 @@ pub struct ExperimentalGcsSpec {
     /// Default: 3000
     #[serde(default, deserialize_with = "convert_duration_with_shellexpand")]
     pub read_timeout_s: u64,
+
+    /// Enables "recently last used" (RLU) tracking by stamping the object's
+    /// GCS `customTime` metadata. When set to a non-zero value, the store
+    /// will:
+    ///   - set `customTime` to the current time when an object is uploaded
+    ///     (establishing a baseline for objects that are never read again),
+    ///     and
+    ///   - refresh `customTime` to the current time when an object is read.
+    ///
+    /// Pair this with a bucket lifecycle rule keyed on `daysSinceCustomTime`,
+    /// e.g.
+    /// `{ "action": {"type": "Delete"}, "condition": {"daysSinceCustomTime": N} }`,
+    /// so that GCS deletes objects that have not been read in `N` days. This
+    /// delegates eviction to GCS rather than tracking it in-process.
+    ///
+    /// To avoid a metadata write on every read, the refresh is throttled: an
+    /// object's `customTime` is only re-stamped on read if the last stamp this
+    /// process issued for it is older than this many seconds. Choose a value
+    /// comfortably smaller than the lifecycle `daysSinceCustomTime` window
+    /// (which has day granularity); a value on the order of hours to a day is
+    /// usually appropriate.
+    ///
+    /// Note: this only controls writes of `customTime`. Reclamation is still
+    /// performed by the GCS lifecycle rule, which runs asynchronously and may
+    /// lag the configured window by up to ~24h.
+    ///
+    /// Default: 0. Zero disables `customTime` tracking entirely.
+    #[serde(default, deserialize_with = "convert_duration_with_shellexpand")]
+    pub custom_time_refresh_interval_s: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
