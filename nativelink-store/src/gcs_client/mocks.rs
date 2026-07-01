@@ -56,6 +56,7 @@ pub struct CallCounts {
     pub upload_chunk_calls: AtomicUsize,
     pub upload_from_reader_calls: AtomicUsize,
     pub object_exists_calls: AtomicUsize,
+    pub custom_time_update_calls: AtomicUsize,
 }
 
 impl Clone for CallCounts {
@@ -72,6 +73,9 @@ impl Clone for CallCounts {
                 self.upload_from_reader_calls.load(Ordering::Relaxed),
             ),
             object_exists_calls: AtomicUsize::new(self.object_exists_calls.load(Ordering::Relaxed)),
+            custom_time_update_calls: AtomicUsize::new(
+                self.custom_time_update_calls.load(Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -108,6 +112,10 @@ pub enum MockRequest {
     },
     ObjectExists {
         object_path: ObjectPath,
+    },
+    UpdateCustomTime {
+        object_path: ObjectPath,
+        custom_time_unix_secs: i64,
     },
 }
 
@@ -162,6 +170,7 @@ impl MockGcsOperations {
                 seconds: now,
                 nanos: 0,
             }),
+            custom_time: None,
         };
 
         let mock_object = MockObject { metadata, content };
@@ -195,6 +204,9 @@ impl MockGcsOperations {
             .store(0, Ordering::Relaxed);
         self.call_counts
             .object_exists_calls
+            .store(0, Ordering::Relaxed);
+        self.call_counts
+            .custom_time_update_calls
             .store(0, Ordering::Relaxed);
         self.requests.write().await.clear();
     }
@@ -257,6 +269,7 @@ impl MockGcsOperations {
                 seconds: timestamp,
                 nanos: 0,
             }),
+            custom_time: None,
         };
 
         let mock_object = MockObject { metadata, content };
@@ -434,6 +447,7 @@ impl GcsOperations for MockGcsOperations {
                         seconds: self.get_current_timestamp(),
                         nanos: 0,
                     }),
+                    custom_time: None,
                 },
                 content: Vec::new(),
             });
@@ -517,6 +531,42 @@ impl GcsOperations for MockGcsOperations {
         let objects = self.objects.read().await;
 
         Ok(objects.contains_key(&object_key))
+    }
+
+    async fn update_object_custom_time(
+        &self,
+        object_path: &ObjectPath,
+        custom_time_unix_secs: i64,
+    ) -> Result<(), Error> {
+        self.call_counts
+            .custom_time_update_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.requests
+            .write()
+            .await
+            .push(MockRequest::UpdateCustomTime {
+                object_path: object_path.clone(),
+                custom_time_unix_secs,
+            });
+
+        self.handle_failure().await?;
+
+        let object_key = self.get_object_key(object_path);
+        let mut objects = self.objects.write().await;
+
+        match objects.get_mut(&object_key) {
+            Some(obj) => {
+                obj.metadata.custom_time = Some(Timestamp {
+                    seconds: custom_time_unix_secs,
+                    nanos: 0,
+                });
+                Ok(())
+            }
+            None => Err(make_err!(
+                Code::NotFound,
+                "Object not found while updating customTime"
+            )),
+        }
     }
 }
 

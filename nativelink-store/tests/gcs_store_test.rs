@@ -633,6 +633,117 @@ async fn test_expired_object() -> Result<(), Error> {
 }
 
 #[nativelink_test]
+async fn custom_time_disabled_by_default() -> Result<(), Error> {
+    // The default store has custom_time_refresh_interval_s == 0, so neither
+    // writes nor reads should ever dispatch a customTime PATCH.
+    let mock_ops = Arc::new(MockGcsOperations::new());
+    let store = create_test_store(mock_ops.clone()).await?;
+
+    let digest = DigestInfo::try_new(VALID_HASH1, 11)?;
+    let store_key: StoreKey = to_store_key(digest);
+
+    store
+        .update_oneshot(store_key.clone(), Bytes::from_static(b"hello world"))
+        .await?;
+    let data = store.get_part_unchunked(store_key, 0, None).await?;
+    assert_eq!(data.as_ref(), b"hello world");
+
+    // Give any (erroneously) dispatched background task a chance to run before
+    // asserting that none was.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        mock_ops
+            .get_call_counts()
+            .custom_time_update_calls
+            .load(Ordering::Relaxed),
+        0,
+        "customTime must never be written when the feature is disabled",
+    );
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn update_sets_custom_time_baseline() -> Result<(), Error> {
+    let mock_ops = Arc::new(MockGcsOperations::new());
+    let store = create_test_store_with_custom_time(mock_ops.clone(), 3600).await?;
+
+    let base_timestamp = 1_000_000;
+    MockClock::set_time(Duration::from_secs(base_timestamp));
+
+    let digest = DigestInfo::try_new(VALID_HASH1, 11)?;
+    let store_key: StoreKey = to_store_key(digest);
+    let object_path = create_object_path(&store_key);
+
+    store
+        .update_oneshot(store_key, Bytes::from_static(b"hello world"))
+        .await?;
+
+    // The PATCH is dispatched asynchronously; wait for it to land.
+    let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 1).await;
+    assert_eq!(
+        stamps,
+        vec![base_timestamp as i64],
+        "Upload should set a customTime baseline once, stamped with the upload time",
+    );
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn get_part_refreshes_custom_time_throttled() -> Result<(), Error> {
+    let refresh_interval_s = 3600;
+    let mock_ops = Arc::new(MockGcsOperations::new());
+    let store = create_test_store_with_custom_time(mock_ops.clone(), refresh_interval_s).await?;
+
+    let digest = DigestInfo::try_new(VALID_HASH1, 11)?;
+    let store_key: StoreKey = to_store_key(digest);
+    let object_path = create_object_path(&store_key);
+    mock_ops
+        .add_object(&object_path, b"hello world".to_vec())
+        .await;
+
+    let base_timestamp = 1_000_000u64;
+    MockClock::set_time(Duration::from_secs(base_timestamp));
+
+    // First read stamps customTime (asynchronously).
+    store.get_part_unchunked(store_key.clone(), 0, None).await?;
+    let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 1).await;
+    assert_eq!(
+        stamps,
+        vec![base_timestamp as i64],
+        "First read should stamp customTime with the read time",
+    );
+
+    // A second read within the throttle window must NOT re-stamp. The throttle
+    // decision is synchronous, so no new task is dispatched; a short wait
+    // confirms nothing additional lands.
+    MockClock::set_time(Duration::from_secs(
+        base_timestamp + u64::from(refresh_interval_s) - 1,
+    ));
+    store.get_part_unchunked(store_key.clone(), 0, None).await?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        custom_time_update_secs(&mock_ops.get_requests().await, &object_path),
+        vec![base_timestamp as i64],
+        "Read within the throttle window should be suppressed",
+    );
+
+    // Once the throttle window has elapsed, the next read re-stamps.
+    let later = base_timestamp + u64::from(refresh_interval_s) + 1;
+    MockClock::set_time(Duration::from_secs(later));
+    store.get_part_unchunked(store_key, 0, None).await?;
+    let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 2).await;
+    assert_eq!(
+        stamps,
+        vec![base_timestamp as i64, later as i64],
+        "Read after the throttle window should re-stamp customTime with the new read time",
+    );
+
+    Ok(())
+}
+
+#[nativelink_test]
 async fn large_file_update_test() -> Result<(), Error> {
     const DATA_SIZE: usize = 11 * 1024 * 1024; // 11MB to exceed SIMPLE_UPLOAD_THRESHOLD
 
@@ -739,6 +850,7 @@ async fn test_null_object_metadata() -> Result<(), Error> {
             seconds: timestamp,
             nanos: 0,
         }),
+        custom_time: None,
     };
 
     let _mock_object = Arc::new((metadata, content));
@@ -824,6 +936,59 @@ async fn create_test_store_with_expiration(
         ops,
         MockInstantWrapped::default,
     )
+}
+
+// Helper function to create a test GCS store with customTime (RLU) tracking
+async fn create_test_store_with_custom_time(
+    ops: Arc<MockGcsOperations>,
+    refresh_interval_s: u32,
+) -> Result<Arc<GcsStore<MockGcsOperations, fn() -> MockInstantWrapped>>, Error> {
+    GcsStore::new_with_ops(
+        &ExperimentalGcsSpec {
+            bucket: BUCKET_NAME.to_string(),
+            common: CommonObjectSpec {
+                key_prefix: Some(KEY_PREFIX.to_string()),
+                ..Default::default()
+            },
+            custom_time_refresh_interval_s: refresh_interval_s,
+            ..Default::default()
+        },
+        ops,
+        MockInstantWrapped::default,
+    )
+}
+
+// Count how many `UpdateCustomTime` requests targeted the given object path.
+// Collect, in order, the `customTime` timestamps PATCHed for `object_path`.
+fn custom_time_update_secs(requests: &[MockRequest], object_path: &ObjectPath) -> Vec<i64> {
+    requests
+        .iter()
+        .filter_map(|req| match req {
+            MockRequest::UpdateCustomTime {
+                object_path: p,
+                custom_time_unix_secs,
+            } if p.path == object_path.path => Some(*custom_time_unix_secs),
+            _ => None,
+        })
+        .collect()
+}
+
+// `touch_custom_time` dispatches the PATCH to a detached background task, so
+// tests must poll until the expected number of `customTime` PATCHes land
+// (rather than asserting synchronously). Returns the timestamps observed.
+async fn wait_for_custom_time_updates(
+    mock_ops: &MockGcsOperations,
+    object_path: &ObjectPath,
+    expected: usize,
+) -> Vec<i64> {
+    for _ in 0..200 {
+        let secs = custom_time_update_secs(&mock_ops.get_requests().await, object_path);
+        if secs.len() >= expected {
+            return secs;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    custom_time_update_secs(&mock_ops.get_requests().await, object_path)
 }
 
 // Helper to create an object path from a store key
