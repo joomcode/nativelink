@@ -44,6 +44,9 @@ pub struct GcsObject {
     pub size: i64,
     pub content_type: String,
     pub update_time: Option<Timestamp>,
+    /// User-specified timestamp (`customTime`) used for "recently last used"
+    /// tracking and `daysSinceCustomTime` lifecycle eviction.
+    pub custom_time: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Copy)]
