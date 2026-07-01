@@ -16,6 +16,7 @@ use core::fmt::Debug;
 use core::pin::Pin;
 use core::time::Duration;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,6 +26,7 @@ use futures::{StreamExt, TryStreamExt};
 use nativelink_config::stores::ExperimentalGcsSpec;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_metric::MetricsComponent;
+use nativelink_util::background_spawn;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::health_utils::{HealthRegistryBuilder, HealthStatus, HealthStatusIndicator};
 use nativelink_util::instant_wrapper::InstantWrapper;
@@ -32,6 +34,7 @@ use nativelink_util::retry::{Retrier, RetryResult};
 use nativelink_util::store_trait::{
     RemoveItemCallback, StoreDriver, StoreKey, StoreOptimizations, UploadSizeInfo,
 };
+use parking_lot::Mutex;
 use rand::Rng;
 use tokio::time::{sleep, timeout};
 use tracing::warn;
@@ -42,6 +45,12 @@ use crate::gcs_client::types::{
     CHUNK_SIZE, DEFAULT_CONCURRENT_UPLOADS, DEFAULT_MAX_RETRY_BUFFER_PER_REQUEST,
     MIN_MULTIPART_SIZE, ObjectPath,
 };
+
+/// Upper bound on the number of entries retained in the in-memory
+/// `customTime` refresh throttle. The map only suppresses redundant metadata
+/// writes, so when it reaches this size it is simply cleared; the only effect
+/// is that a few objects may be re-stamped sooner than strictly necessary.
+const MAX_CUSTOM_TIME_THROTTLE_ENTRIES: usize = 100_000;
 
 #[derive(MetricsComponent, Debug)]
 pub struct GcsStore<Client: GcsOperations, NowFn> {
@@ -60,6 +69,14 @@ pub struct GcsStore<Client: GcsOperations, NowFn> {
     max_chunk_size: usize,
     #[metric(help = "The number of concurrent uploads allowed")]
     max_concurrent_uploads: usize,
+    #[metric(
+        help = "Minimum seconds between customTime refreshes per object; 0 disables RLU tracking"
+    )]
+    custom_time_refresh_interval_s: i64,
+    /// Tracks the last `customTime` this process stamped per object path, used
+    /// to throttle metadata writes on reads. Bounded by
+    /// `MAX_CUSTOM_TIME_THROTTLE_ENTRIES`.
+    recently_touched: Mutex<HashMap<String, i64>>,
 }
 
 impl<I, NowFn> GcsStore<GcsClient, NowFn>
@@ -76,7 +93,7 @@ where
 impl<I, Client, NowFn> GcsStore<Client, NowFn>
 where
     I: InstantWrapper,
-    Client: GcsOperations + Send + Sync,
+    Client: GcsOperations + Send + Sync + 'static,
     NowFn: Fn() -> I + Send + Sync + Unpin + 'static,
 {
     // Primarily used for injecting a mock or real operations implementation
@@ -141,6 +158,8 @@ where
             max_retry_buffer_size,
             max_chunk_size,
             max_concurrent_uploads: max_connections,
+            custom_time_refresh_interval_s: i64::from(spec.custom_time_refresh_interval_s),
+            recently_touched: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -196,6 +215,53 @@ where
             self.bucket.clone(),
             &format!("{}{}", self.key_prefix, key.as_str()),
         )
+    }
+
+    /// Stamp an object's `customTime` with the current time for "recently last
+    /// used" tracking. When `force` is false (reads) the write is throttled to
+    /// at most once per `custom_time_refresh_interval_s` per object; when true
+    /// (writes) the baseline is always set.
+    ///
+    /// The throttle decision is made synchronously, but the `customTime` PATCH
+    /// itself is dispatched to a detached background task so it never adds
+    /// latency to the read/write hot path. It is best-effort: failures are
+    /// logged and never propagated, since the data operation has already
+    /// succeeded by the time this is called.
+    fn touch_custom_time(self: Pin<&Self>, object_path: &ObjectPath, force: bool) {
+        if self.custom_time_refresh_interval_s == 0 {
+            return;
+        }
+
+        let now_s = (self.now_fn)().unix_timestamp() as i64;
+
+        {
+            let mut recently_touched = self.recently_touched.lock();
+            if !force
+                && let Some(&last_s) = recently_touched.get(&object_path.path)
+                && now_s.saturating_sub(last_s) < self.custom_time_refresh_interval_s
+            {
+                return;
+            }
+            // Record optimistically (before dispatching the PATCH) so a burst
+            // of concurrent reads for the same object dispatches a single
+            // PATCH. A failed PATCH self-heals on the next interval.
+            if recently_touched.len() >= MAX_CUSTOM_TIME_THROTTLE_ENTRIES {
+                recently_touched.clear();
+            }
+            recently_touched.insert(object_path.path.clone(), now_s);
+        }
+
+        let client = Arc::clone(&self.client);
+        let object_path = object_path.clone();
+        background_spawn!("gcs_touch_custom_time", async move {
+            if let Err(e) = client.update_object_custom_time(&object_path, now_s).await {
+                warn!(
+                    ?e,
+                    path = object_path.path,
+                    "Failed to update customTime for RLU tracking",
+                );
+            }
+        });
     }
 }
 
@@ -261,7 +327,7 @@ where
             let content_len = content.len() as u64;
             let client = &self.client;
 
-            return self
+            let written = self
                 .retrier
                 .retry(unfold(content, |content| async {
                     match client.write_object(&object_path, content.to_vec()).await {
@@ -269,7 +335,9 @@ where
                         Err(e) => Some((RetryResult::Retry(e), content)),
                     }
                 }))
-                .await;
+                .await?;
+            self.touch_custom_time(&object_path, true);
+            return Ok(written);
         }
 
         // For larger files, we'll use resumable upload
@@ -368,7 +436,7 @@ where
             }
         } else {
             // Handle streamed empty file.
-            return self
+            let written = self
                 .retrier
                 .retry(unfold((), |()| async {
                     match client.write_object(&object_path, Vec::new()).await {
@@ -376,7 +444,9 @@ where
                         Err(e) => Some((RetryResult::Retry(e), ())),
                     }
                 }))
-                .await;
+                .await?;
+            self.touch_custom_time(&object_path, true);
+            return Ok(written);
         }
 
         // Verifying if the upload was successful
@@ -396,6 +466,7 @@ where
             }))
             .await?;
 
+        self.touch_custom_time(&object_path, true);
         Ok(offset)
     }
 
@@ -450,7 +521,11 @@ where
                     Some((RetryResult::Ok(()), (offset, writer)))
                 },
             ))
-            .await
+            .await?;
+
+        // Bump "recently last used" recency on a successful read (throttled).
+        self.touch_custom_time(&object_path, false);
+        Ok(())
     }
 
     fn inner_store(&self, _digest: Option<StoreKey>) -> &'_ dyn StoreDriver {
