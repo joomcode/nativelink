@@ -1309,7 +1309,11 @@ pub struct ExperimentalGcsSpec {
     ///   - set `customTime` to the current time when an object is uploaded
     ///     (establishing a baseline for objects that are never read again),
     ///     and
-    ///   - refresh `customTime` to the current time when an object is read.
+    ///   - refresh `customTime` to the current time when an object is read or
+    ///     confirmed present by an existence check (`FindMissingBlobs`). The
+    ///     latter matters because a blob that is repeatedly referenced by
+    ///     builds but never re-downloaded (clients already hold it locally)
+    ///     must still be kept alive.
     ///
     /// Pair this with a bucket lifecycle rule keyed on `daysSinceCustomTime`,
     /// e.g.
