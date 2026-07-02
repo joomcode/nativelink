@@ -169,8 +169,9 @@ where
         let consider_expired_after_s = self.consider_expired_after_s;
         let now_fn = &self.now_fn;
 
-        self.retrier
-            .retry(unfold(object_path, move |object_path| async move {
+        let result = self
+            .retrier
+            .retry(unfold(object_path.clone(), move |object_path| async move {
                 match client.read_object_metadata(&object_path).await.err_tip(|| {
                     format!(
                         "Error while trying to read - bucket: {} path: {}",
@@ -207,7 +208,18 @@ where
                     Err(e) => Some((RetryResult::Retry(e), object_path)),
                 }
             }))
-            .await
+            .await?;
+
+        // A present blob returned from an existence check (FindMissingBlobs) is
+        // an active-liveness signal: the caller is relying on it right now and
+        // will skip re-uploading it. Refresh its recency (throttled) so it is
+        // not evicted by the `daysSinceCustomTime` lifecycle rule while still in
+        // use, even if it is never re-downloaded.
+        if result.is_some() {
+            self.touch_custom_time(&object_path, false);
+        }
+
+        Ok(result)
     }
 
     fn make_object_path(&self, key: &StoreKey) -> ObjectPath {
@@ -218,9 +230,9 @@ where
     }
 
     /// Stamp an object's `customTime` with the current time for "recently last
-    /// used" tracking. When `force` is false (reads) the write is throttled to
-    /// at most once per `custom_time_refresh_interval_s` per object; when true
-    /// (writes) the baseline is always set.
+    /// used" tracking. When `force` is false (reads and existence checks) the
+    /// write is throttled to at most once per `custom_time_refresh_interval_s`
+    /// per object; when true (writes) the baseline is always set.
     ///
     /// The throttle decision is made synchronously, but the `customTime` PATCH
     /// itself is dispatched to a detached background task so it never adds
