@@ -744,6 +744,44 @@ async fn get_part_refreshes_custom_time_throttled() -> Result<(), Error> {
 }
 
 #[nativelink_test]
+async fn has_refreshes_custom_time_for_present_blob_only() -> Result<(), Error> {
+    let mock_ops = Arc::new(MockGcsOperations::new());
+    let store = create_test_store_with_custom_time(mock_ops.clone(), 3600).await?;
+
+    let base_timestamp = 1_000_000u64;
+    MockClock::set_time(Duration::from_secs(base_timestamp));
+
+    let present_key: StoreKey = to_store_key(DigestInfo::try_new(VALID_HASH1, 5)?);
+    let present_path = create_object_path(&present_key);
+    mock_ops
+        .add_object(&present_path, vec![1, 2, 3, 4, 5])
+        .await;
+
+    // FindMissingBlobs on a present blob is a liveness signal and must refresh
+    // its customTime (throttled), so it survives daysSinceCustomTime eviction
+    // even without being re-downloaded.
+    assert_eq!(store.has(present_key).await?, Some(5));
+    let stamps = wait_for_custom_time_updates(&mock_ops, &present_path, 1).await;
+    assert_eq!(
+        stamps,
+        vec![base_timestamp as i64],
+        "Existence check on a present blob should refresh customTime",
+    );
+
+    // A check for a blob that is absent must not PATCH anything.
+    let missing_key: StoreKey = to_store_key(DigestInfo::try_new(VALID_HASH1, 9)?);
+    let missing_path = create_object_path(&missing_key);
+    assert_eq!(store.has(missing_key).await?, None);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        custom_time_update_secs(&mock_ops.get_requests().await, &missing_path).is_empty(),
+        "Existence check on a missing blob must not stamp customTime",
+    );
+
+    Ok(())
+}
+
+#[nativelink_test]
 async fn large_file_update_test() -> Result<(), Error> {
     const DATA_SIZE: usize = 11 * 1024 * 1024; // 11MB to exceed SIMPLE_UPLOAD_THRESHOLD
 
