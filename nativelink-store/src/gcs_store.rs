@@ -521,6 +521,13 @@ where
                     while let Some(next_chunk) = stream.next().await {
                         match next_chunk {
                             Ok(bytes) => {
+                                // The GCS download stream can yield empty frames at
+                                // chunk boundaries/end-of-body. `writer.send()` rejects
+                                // empty buffers ("Cannot send EOF in send()"), and EOF is
+                                // signalled explicitly after the loop, so skip empties.
+                                if bytes.is_empty() {
+                                    continue;
+                                }
                                 offset += bytes.len() as u64;
                                 if let Err(err) = writer.send(bytes).await {
                                     return Some((RetryResult::Err(err), (offset, writer)));
