@@ -1631,7 +1631,7 @@ async fn executable_hardlink_source_created_once_and_readonly() -> Result<(), Er
     // First call materializes the executable variant: a separate 0o555 inode
     // with identical content.
     let exec1 = store.get_executable_hardlink_source(&digest).await?;
-    let exec_meta1 = fs::metadata(&exec1).await?;
+    let exec_meta1 = fs::metadata(exec1.path()).await?;
     assert_eq!(
         exec_meta1.mode() & 0o777,
         0o555,
@@ -1643,7 +1643,7 @@ async fn executable_hardlink_source_created_once_and_readonly() -> Result<(), Er
         "executable variant must be a private inode, not the shared CAS blob"
     );
     assert_eq!(
-        read_file_contents(exec1.as_os_str()).await?,
+        read_file_contents(exec1.path()).await?,
         VALUE1.as_bytes(),
         "executable variant content must match the CAS blob"
     );
@@ -1651,9 +1651,13 @@ async fn executable_hardlink_source_created_once_and_readonly() -> Result<(), Er
     // Second call is created-once: same path and same inode (callers hardlink
     // this one inode many times rather than re-copying per action).
     let exec2 = store.get_executable_hardlink_source(&digest).await?;
-    assert_eq!(exec1, exec2, "executable variant path must be stable");
     assert_eq!(
-        fs::metadata(&exec2).await?.ino(),
+        exec1.path(),
+        exec2.path(),
+        "executable variant path must be stable"
+    );
+    assert_eq!(
+        fs::metadata(exec2.path()).await?.ino(),
         exec_meta1.ino(),
         "second call must reuse the same variant inode (created once)"
     );
@@ -1674,7 +1678,7 @@ async fn executable_hardlink_source_created_once_and_readonly() -> Result<(), Er
     // Hardlinking the variant yields an executable that shares its inode — the
     // hardlink-only materialization the worker now performs.
     let dest = OsString::from(format!("{temp_path}/materialized_exec"));
-    fs::hard_link(&exec1, &dest).await?;
+    fs::hard_link(exec1.path(), &dest).await?;
     let dest_meta = fs::metadata(&dest).await?;
     assert_eq!(
         dest_meta.ino(),
@@ -1780,11 +1784,11 @@ async fn executable_variants_not_evicted_without_policy() -> Result<(), Error> {
     // Neither variant is tracked for eviction, so both remain on disk
     // regardless of how many are materialized.
     assert!(
-        fs::metadata(&exec1).await.is_ok(),
+        fs::metadata(exec1.path()).await.is_ok(),
         "first variant must survive when eviction is disabled"
     );
     assert!(
-        fs::metadata(&exec2).await.is_ok(),
+        fs::metadata(exec2.path()).await.is_ok(),
         "second variant must survive when eviction is disabled"
     );
 
@@ -1819,16 +1823,25 @@ async fn executable_variants_evicted_with_policy() -> Result<(), Error> {
     store.update_oneshot(digest2, VALUE2.into()).await?;
 
     // Materialize the first variant, then a second. The second insert pushes
-    // the map past `max_count: 1`, evicting the first variant (LRU).
+    // the map past `max_count: 1`, evicting the first variant (LRU). The
+    // returned sources pin the files, so drop them before expecting deletion.
     let exec1 = store.get_executable_hardlink_source(&digest1).await?;
-    assert!(fs::metadata(&exec1).await.is_ok(), "first variant created");
+    let exec1_path = exec1.path().to_os_string();
+    assert!(
+        fs::metadata(&exec1_path).await.is_ok(),
+        "first variant created"
+    );
+    drop(exec1);
     let exec2 = store.get_executable_hardlink_source(&digest2).await?;
-    assert!(fs::metadata(&exec2).await.is_ok(), "second variant created");
+    assert!(
+        fs::metadata(exec2.path()).await.is_ok(),
+        "second variant created"
+    );
 
     // Eviction deletes the file off the hot path (background), so poll for it.
     let mut evicted = false;
     for _ in 0..1000 {
-        if fs::metadata(&exec1).await.is_err() {
+        if fs::metadata(&exec1_path).await.is_err() {
             evicted = true;
             break;
         }
@@ -1839,16 +1852,241 @@ async fn executable_variants_evicted_with_policy() -> Result<(), Error> {
         "least-recently-used variant must be deleted from disk once evicted"
     );
     assert!(
-        fs::metadata(&exec2).await.is_ok(),
+        fs::metadata(exec2.path()).await.is_ok(),
         "most-recently-used variant must remain on disk"
     );
 
-    // The evicted variant is regenerable: requesting it again recreates it.
+    // The evicted variant is regenerable: requesting it again recreates it at
+    // a fresh unique path (never reusing a doomed predecessor's name).
     let exec1_again = store.get_executable_hardlink_source(&digest1).await?;
-    assert_eq!(exec1, exec1_again, "recreated variant path must be stable");
+    assert_ne!(
+        exec1_path,
+        exec1_again.path(),
+        "recreated variant must get a fresh unique path"
+    );
     assert!(
-        fs::metadata(&exec1_again).await.is_ok(),
+        fs::metadata(exec1_again.path()).await.is_ok(),
         "variant must be recreated on demand after eviction"
+    );
+
+    Ok(())
+}
+
+/// Regression test: an executable variant that is *in use* — a caller holds
+/// the resolved [`ExecutableHardlinkSource`] but has not hardlinked it yet —
+/// must survive being evicted from the executable eviction map. Before the
+/// fix, eviction deleted the file eagerly, so a hot variant could vanish
+/// between path resolution and `hard_link`, failing the action with `NotFound`.
+#[cfg(target_family = "unix")]
+#[nativelink_test]
+async fn evicted_executable_variant_survives_while_pinned() -> Result<(), Error> {
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    let digest1 = DigestInfo::try_new(HASH1, VALUE1.len())?;
+    let digest2 = DigestInfo::try_new(HASH2, VALUE2.len())?;
+
+    let store = Box::pin(
+        FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+            content_path: content_path.clone(),
+            temp_path: temp_path.clone(),
+            executable_eviction_policy: Some(EvictionPolicy {
+                max_count: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?,
+    );
+    store.update_oneshot(digest1, VALUE1.into()).await?;
+    store.update_oneshot(digest2, VALUE2.into()).await?;
+
+    // Resolve digest1's variant and keep the source alive — this models a
+    // worker that resolved the path but has not run `hard_link` yet.
+    let exec1 = store.get_executable_hardlink_source(&digest1).await?;
+    let exec1_path = exec1.path().to_os_string();
+
+    // Materializing digest2's variant pushes the map past `max_count: 1`,
+    // evicting digest1's entry while it is still pinned.
+    let exec2 = store.get_executable_hardlink_source(&digest2).await?;
+
+    // Give any (incorrect) eager background delete a chance to run, then
+    // prove the pinned file is still on disk and hardlinkable — the exact
+    // operation that used to race with eviction.
+    sleep(Duration::from_millis(50)).await;
+    assert!(
+        fs::metadata(&exec1_path).await.is_ok(),
+        "evicted-but-pinned variant must remain on disk"
+    );
+    let dest = OsString::from(format!("{temp_path}/pinned_exec"));
+    fs::hard_link(exec1.path(), &dest)
+        .await
+        .err_tip(|| "Hardlink of a pinned, just-evicted variant must succeed")?;
+    assert_eq!(
+        read_file_contents(dest.as_os_str()).await?,
+        VALUE1.as_bytes(),
+        "hardlinked executable must carry the variant's content"
+    );
+
+    // Dropping the last pin releases the file: the deferred delete now runs.
+    drop(exec1);
+    let mut deleted = false;
+    for _ in 0..1000 {
+        if fs::metadata(&exec1_path).await.is_err() {
+            deleted = true;
+            break;
+        }
+        sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        deleted,
+        "variant file must be deleted once the last pin is dropped"
+    );
+
+    // The already-created hardlink shares the inode, so it survives the
+    // variant file's deletion; the untouched second variant survives too.
+    assert_eq!(
+        read_file_contents(dest.as_os_str()).await?,
+        VALUE1.as_bytes(),
+        "existing hardlinks must keep the inode alive after deletion"
+    );
+    assert!(
+        fs::metadata(exec2.path()).await.is_ok(),
+        "the still-tracked variant must remain on disk"
+    );
+
+    Ok(())
+}
+
+/// A variant that alone exceeds the executable eviction policy is evicted by
+/// its own insert — but the caller that just materialized it must still be
+/// able to hardlink it, and recreating it later must not collide with the
+/// doomed file. Before the fix this was a deterministic failure loop: every
+/// resolve recreated the file at the same path and eviction deleted it again
+/// before the caller's hardlink.
+#[cfg(target_family = "unix")]
+#[nativelink_test]
+async fn oversized_executable_variant_usable_until_dropped() -> Result<(), Error> {
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    let digest1 = DigestInfo::try_new(HASH1, VALUE1.len())?;
+
+    let store = Box::pin(
+        FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+            content_path: content_path.clone(),
+            temp_path: temp_path.clone(),
+            // Any variant's block-aligned size exceeds this, so each insert
+            // immediately evicts the entry it just added.
+            executable_eviction_policy: Some(EvictionPolicy {
+                max_bytes: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?,
+    );
+    store.update_oneshot(digest1, VALUE1.into()).await?;
+
+    // The insert self-evicts, but the returned source pins the file.
+    let exec_a = store.get_executable_hardlink_source(&digest1).await?;
+    let exec_a_path = exec_a.path().to_os_string();
+    assert!(
+        fs::metadata(&exec_a_path).await.is_ok(),
+        "self-evicted variant must remain on disk while its source is held"
+    );
+    let dest = OsString::from(format!("{temp_path}/oversized_exec"));
+    fs::hard_link(exec_a.path(), &dest)
+        .await
+        .err_tip(|| "Hardlink of a self-evicted variant must succeed")?;
+
+    // Resolving again while the doomed predecessor is still pinned must
+    // produce an independent file at a distinct path.
+    let exec_b = store.get_executable_hardlink_source(&digest1).await?;
+    assert_ne!(
+        exec_a.path(),
+        exec_b.path(),
+        "recreated variant must never reuse a doomed predecessor's path"
+    );
+    assert!(
+        fs::metadata(exec_b.path()).await.is_ok(),
+        "recreated variant must exist alongside the doomed predecessor"
+    );
+
+    // Dropping the predecessor deletes only its own file.
+    drop(exec_a);
+    let mut deleted = false;
+    for _ in 0..1000 {
+        if fs::metadata(&exec_a_path).await.is_err() {
+            deleted = true;
+            break;
+        }
+        sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        deleted,
+        "doomed variant must be deleted once its last pin is dropped"
+    );
+    assert!(
+        fs::metadata(exec_b.path()).await.is_ok(),
+        "the successor's file must be untouched by the predecessor's delete"
+    );
+
+    Ok(())
+}
+
+/// When both the primary CAS policy and `executable_eviction_policy` are set,
+/// evicting a digest from the primary CAS removes its variant *through* the
+/// executable eviction map: accounting stays correct, and a pinned variant
+/// still survives until its last in-flight user drops it.
+#[cfg(target_family = "unix")]
+#[nativelink_test]
+async fn evicting_digest_removes_tracked_executable_variant() -> Result<(), Error> {
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    let digest1 = DigestInfo::try_new(HASH1, VALUE1.len())?;
+    let digest2 = DigestInfo::try_new(HASH2, VALUE2.len())?;
+
+    let store = Box::pin(
+        FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+            content_path: content_path.clone(),
+            temp_path: temp_path.clone(),
+            eviction_policy: Some(EvictionPolicy {
+                max_count: 1,
+                ..Default::default()
+            }),
+            executable_eviction_policy: Some(EvictionPolicy {
+                max_count: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?,
+    );
+    store.update_oneshot(digest1, VALUE1.into()).await?;
+
+    let exec1 = store.get_executable_hardlink_source(&digest1).await?;
+    let exec1_path = exec1.path().to_os_string();
+
+    // max_count: 1 on the primary CAS means inserting a second digest evicts
+    // digest1, which removes its variant from the executable map — but the
+    // held source must keep the file itself alive.
+    store.update_oneshot(digest2, VALUE2.into()).await?;
+    assert!(
+        fs::metadata(&exec1_path).await.is_ok(),
+        "pinned variant must survive its digest's CAS eviction"
+    );
+
+    drop(exec1);
+    let mut deleted = false;
+    for _ in 0..1000 {
+        if fs::metadata(&exec1_path).await.is_err() {
+            deleted = true;
+            break;
+        }
+        sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        deleted,
+        "variant must be deleted once its digest is CAS-evicted and the pin drops"
     );
 
     Ok(())
@@ -1883,7 +2121,9 @@ async fn evicting_digest_deletes_its_executable_variant() -> Result<(), Error> {
     store.update_oneshot(digest1, VALUE1.into()).await?;
 
     let variant_path = OsString::from(format!("{content_path}.exec/{DIGEST_FOLDER}/{digest1}"));
-    store.get_executable_hardlink_source(&digest1).await?;
+    // Eviction of untracked variants is keyed purely on the canonical path;
+    // the source carries no pin, so dropping it immediately is fine.
+    drop(store.get_executable_hardlink_source(&digest1).await?);
     fs::metadata(&variant_path)
         .await
         .err_tip(|| "Executable variant should exist right after creation")?;
