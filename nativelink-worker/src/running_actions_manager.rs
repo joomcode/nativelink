@@ -369,20 +369,27 @@ pub fn download_to_directory<'a>(
                             // per-digest 0o555 variant created once off the hot
                             // path (the 0o444 CAS blob is shared and cannot carry
                             // +x); non-executables hardlink the 0o444 CAS blob.
-                            let src_path = if is_executable {
-                                filesystem_store
+                            // `_executable_variant_pin` keeps the resolved
+                            // 0o555 variant's eviction entry alive until the
+                            // hardlink below lands: without it a racing
+                            // eviction could delete the variant file between
+                            // path resolution and `hard_link`.
+                            let (src_path, _executable_variant_pin) = if is_executable {
+                                let source = filesystem_store
                                     .get_executable_hardlink_source(&digest)
                                     .await
-                                    .err_tip(|| "Resolving executable hardlink source")?
+                                    .err_tip(|| "Resolving executable hardlink source")?;
+                                (source.path().to_os_string(), Some(source))
                             } else {
                                 let file_entry = filesystem_store
                                     .get_file_entry_for_digest(&digest)
                                     .await
                                     .err_tip(|| "During hard link")?;
                                 // TODO: add a test for #2051: deadlock with large number of files
-                                file_entry
+                                let path = file_entry
                                     .get_file_path_locked(|src| async move { Ok(src) })
-                                    .await?
+                                    .await?;
+                                (path, None)
                             };
                             fs::hard_link(&src_path, &dest)
                                 .await

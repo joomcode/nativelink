@@ -780,7 +780,10 @@ pub struct FilesystemSpec {
     /// When unset (the default) the variants are never evicted at runtime,
     /// preserving the historical behavior. When set, each variant is tracked in
     /// a dedicated eviction map and deleted from disk LRU-style against this
-    /// policy, independently of the main content cache.
+    /// policy, independently of the main content cache. A variant currently in
+    /// use as a hardlink source is never deleted out from under its user:
+    /// eviction only stops tracking it, and the file is removed once the last
+    /// in-flight use completes.
     ///
     /// Unix-only; ignored on other platforms (no executable bit, no variants).
     /// Default: unset (no runtime eviction).
