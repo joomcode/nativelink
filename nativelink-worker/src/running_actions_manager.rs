@@ -60,7 +60,9 @@ use nativelink_store::ac_utils::{
 };
 use nativelink_store::cas_utils::is_zero_digest;
 use nativelink_store::fast_slow_store::FastSlowStore;
-use nativelink_store::filesystem_store::{FileEntry, FileEntryImpl, FilesystemStore};
+use nativelink_store::filesystem_store::{
+    ExecutableHardlinkSource, FileEntry, FileEntryImpl, FilesystemStore,
+};
 use nativelink_store::grpc_store::GrpcStore;
 use nativelink_util::action_messages::{
     ActionInfo, ActionResult, DirectoryInfo, ExecutionMetadata, FileInfo, NameOrPath, OperationId,
@@ -979,6 +981,9 @@ struct PendingLink {
     /// `experimental_active_input_leases`, since a leased digest is not evicted,
     /// or raise the store's `max_bytes`.
     _keepalive: Option<Arc<FileEntryImpl>>,
+    /// Pins an executable variant under `executable_eviction_policy`, so a
+    /// racing eviction cannot delete the file before the link is made.
+    _variant_pin: Option<ExecutableHardlinkSource>,
 }
 
 /// A file whose CAS blob has not been resolved to a path yet.
@@ -1261,7 +1266,7 @@ async fn relink_evicted_input(
                     .err_tip(|| {
                         format!("Resolving the executable variant for {} again", link.digest)
                     })?;
-                fs::hard_link(src, &link.dst).await
+                fs::hard_link(src.path(), &link.dst).await
             },
         )
         .await?;
@@ -1328,6 +1333,7 @@ async fn resolve_plain_files(
                 digest: file.digest,
                 executable: false,
                 _keepalive: Some(file_entry),
+                _variant_pin: None,
             })
         });
     }
@@ -1367,8 +1373,8 @@ async fn resolve_exec_files(
     let mut tasks = Vec::with_capacity(files.len());
     for (file, source) in files.into_iter().zip(sources) {
         tasks.push(async move {
-            let src_path = if let Ok(src_path) = source {
-                src_path
+            let source = if let Ok(source) = source {
+                source
             } else {
                 let _permit = acquire_download_permit(downloads).await?;
                 fetch_and_resolve(
@@ -1380,11 +1386,12 @@ async fn resolve_exec_files(
                 .err_tip(|| format!("Resolving executable variant for {}", file.digest))?
             };
             Ok::<_, Error>(PendingLink {
-                src: PathBuf::from(src_path),
+                src: PathBuf::from(source.path()),
                 dst: PathBuf::from(file.dst),
                 digest: file.digest,
                 executable: true,
                 _keepalive: None,
+                _variant_pin: Some(source),
             })
         });
     }
