@@ -480,16 +480,26 @@ const SIMULTANEOUS_METADATA_READS: usize = 200;
 type FsEvictingMap<'a, Fe> =
     EvictingMap<StoreKeyBorrow, StoreKey<'a>, Arc<Fe>, SystemTime, RemoveItemCallbackHolder>;
 
+/// Monotonic counter suffixing each tracked executable variant's file name
+/// (see [`FilesystemStore::unique_executable_variant_path`]) so a variant
+/// recreated after an eviction never shares a path with a doomed predecessor.
+#[cfg(unix)]
+static EXECUTABLE_VARIANT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Eviction entry for a per-digest executable variant living in
-/// `{content_path}.exec`. Unlike CAS blobs, a variant is never handed out as a
-/// long-lived `Arc` to readers — the worker resolves its path and hardlinks it
-/// immediately — so eviction can simply delete the file from disk (the
-/// already-created hardlinks keep the inode alive). The variant is regenerable,
-/// so a failed delete only wastes disk until the next startup wipe.
+/// `{content_path}.exec`. The entry owns its file: each materialization gets a
+/// **unique** file name, and the file is deleted when the entry is dropped —
+/// not when it is evicted from the map. Eviction merely drops the map's `Arc`;
+/// an in-flight user that resolved this variant still holds the entry through
+/// an [`ExecutableHardlinkSource`], keeping the file on disk until its
+/// `hard_link` has completed. The variant is regenerable, so a failed delete
+/// only wastes disk until the next startup wipe.
 #[cfg(unix)]
 #[derive(Debug)]
 struct ExecutableVariantEntry {
-    /// Full path of the `0o555` variant file.
+    /// Full, unique path of the `0o555` variant file. Never reused by a later
+    /// materialization of the same digest, so the deferred delete in `Drop`
+    /// can never clobber a successor's file.
     path: OsString,
     /// Block-aligned size on disk, used for eviction accounting. Mirrors the
     /// CAS `FileEntry::size_on_disk` so both maps account bytes the same way.
@@ -508,11 +518,21 @@ impl LenEntry for ExecutableVariantEntry {
         self.size_on_disk == 0
     }
 
-    #[inline]
-    async fn unref(&self) {
-        // The map has already debited this entry's bytes; reclaim the disk in
-        // the background so eviction doesn't block on filesystem I/O.
-        let path = self.path.clone();
+    // `unref` deliberately keeps its default no-op: removal from the map must
+    // NOT delete the file, because an in-flight hardlink may still hold this
+    // entry (and use its path) via an `ExecutableHardlinkSource`. Deletion
+    // happens in `Drop` once the last holder is done. Deleting on
+    // shutdown-drop is harmless — the directory is wiped on the next startup
+    // anyway.
+}
+
+#[cfg(unix)]
+impl Drop for ExecutableVariantEntry {
+    fn drop(&mut self) {
+        // The map has already debited this entry's bytes when it was evicted;
+        // reclaim the disk in the background so dropping never blocks on
+        // filesystem I/O.
+        let path = core::mem::take(&mut self.path);
         background_spawn!("filesystem_delete_exec_variant", async move {
             match fs::remove_file(&path).await {
                 Ok(()) => debug!(?path, "Executable variant deleted"),
@@ -523,6 +543,43 @@ impl LenEntry for ExecutableVariantEntry {
                 Err(err) => error!(?path, ?err, "Failed to delete executable variant"),
             }
         });
+    }
+}
+
+/// A resolved executable hardlink source (see
+/// [`FilesystemStore::get_executable_hardlink_source`]). Holding it pins the
+/// on-disk variant file: a racing eviction can remove the variant from the
+/// eviction map, but the file itself is only deleted after the last
+/// `ExecutableHardlinkSource` for it is dropped. Callers must keep it alive
+/// until their `hard_link` from [`Self::path`] has completed.
+#[derive(Debug)]
+#[must_use = "holding this pins the variant file; drop it only after the hardlink completes"]
+pub struct ExecutableHardlinkSource {
+    path: OsString,
+    /// Pin on the eviction entry. `None` when runtime eviction is disabled:
+    /// the variant is then only reclaimed by the startup wipe, so the path
+    /// cannot disappear underneath the caller.
+    #[cfg(unix)]
+    _entry: Option<Arc<ExecutableVariantEntry>>,
+}
+
+impl ExecutableHardlinkSource {
+    pub fn path(&self) -> &OsStr {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
+impl ExecutableHardlinkSource {
+    fn tracked(entry: Arc<ExecutableVariantEntry>) -> Self {
+        Self {
+            path: entry.path.clone(),
+            _entry: Some(entry),
+        }
+    }
+
+    const fn untracked(path: OsString) -> Self {
+        Self { path, _entry: None }
     }
 }
 
@@ -840,17 +897,24 @@ where
     Ok(false)
 }
 
-/// Deletes a digest's `.exec` variant (see
+/// Removes a digest's `.exec` variant (see
 /// [`FilesystemStore::get_executable_hardlink_source`]) when that digest is
 /// evicted or replaced in the primary CAS `evicting_map`. Without this, the
 /// `.exec` directory is invisible to `max_bytes` and is only ever cleared by
 /// the startup `remove_dir_all`, so it grows without bound at runtime (#2474).
 /// Tying its lifetime to the primary entry instead bounds total disk use to
 /// roughly `2 * max_bytes` in the worst case (every blob also executable).
+///
+/// When `executable_eviction_policy` is set the variant is owned by an entry
+/// in `executable_evicting_map`, so removal is routed through that map: this
+/// keeps its byte/count accounting correct and defers the file delete until
+/// any in-flight user of the variant has finished. Otherwise the variant is
+/// untracked at its canonical path and is deleted directly.
 #[cfg(unix)]
 #[derive(Debug)]
 struct ExecutableVariantRemover {
     content_path: String,
+    executable_evicting_map: Option<Arc<ExecutableEvictingMap>>,
 }
 
 #[cfg(unix)]
@@ -863,6 +927,12 @@ impl RemoveItemCallback for ExecutableVariantRemover {
             let StoreKey::Digest(digest) = store_key else {
                 return;
             };
+            if let Some(map) = &self.executable_evicting_map {
+                // Tracked mode: dropping the map's entry deletes its uniquely
+                // named file once the last in-flight user drops it.
+                map.remove(&digest).await;
+                return;
+            }
             let variant_path = format!(
                 "{}{EXECUTABLE_DIR_SUFFIX}/{DIGEST_FOLDER}/{digest}",
                 self.content_path
@@ -966,6 +1036,7 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             evicting_map.add_remove_callback(RemoveItemCallbackHolder::new(Arc::new(
                 ExecutableVariantRemover {
                     content_path: spec.content_path.clone(),
+                    executable_evicting_map: executable_evicting_map.clone(),
                 },
             )));
         }
@@ -1020,7 +1091,10 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         self.weak_self.upgrade()
     }
 
-    /// Path of the read-only executable (0o555) variant for `digest`.
+    /// Canonical path of the read-only executable (0o555) variant for
+    /// `digest`. Only used when runtime eviction of variants is disabled — the
+    /// stable name is what makes the metadata-based fast path work without a
+    /// map to index the variants.
     #[cfg(unix)]
     fn executable_variant_path(&self, digest: &DigestInfo) -> OsString {
         format!(
@@ -1028,6 +1102,41 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             self.shared_context.content_path
         )
         .into()
+    }
+
+    /// Unique on-disk path for a **tracked** executable variant of `digest`.
+    /// The counter suffix guarantees a variant recreated after an eviction
+    /// never collides with a doomed predecessor whose deferred delete is still
+    /// pending behind an in-flight [`ExecutableHardlinkSource`].
+    #[cfg(unix)]
+    fn unique_executable_variant_path(&self, digest: &DigestInfo) -> OsString {
+        let unique_id = EXECUTABLE_VARIANT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "{}{EXECUTABLE_DIR_SUFFIX}/{DIGEST_FOLDER}/{digest}-{unique_id}",
+            self.shared_context.content_path
+        )
+        .into()
+    }
+
+    /// Fast-path lookup of an already-materialized variant for `digest`: its
+    /// live eviction entry when tracking is enabled (also refreshing LRU
+    /// recency), or its canonical on-disk path when eviction is disabled.
+    #[cfg(unix)]
+    async fn find_existing_executable_variant(
+        &self,
+        digest: &DigestInfo,
+    ) -> Option<ExecutableHardlinkSource> {
+        if let Some(map) = &self.executable_evicting_map {
+            // The map is authoritative for tracked variants: a file on disk
+            // without a live entry is a doomed predecessor whose delete is
+            // merely deferred, so it must never be handed out.
+            return map.get(digest).await.map(ExecutableHardlinkSource::tracked);
+        }
+        let variant_path = self.executable_variant_path(digest);
+        fs::metadata(&variant_path)
+            .await
+            .is_ok()
+            .then(|| ExecutableHardlinkSource::untracked(variant_path))
     }
 
     /// Returns the path to a private, read-only **executable** (0o555) copy of
@@ -1046,23 +1155,21 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
     /// **once** — writer fd fsync'd and closed, then atomically renamed into
     /// place before the inode is ever hardlinked or executed — and hardlinking
     /// it thereafter keeps the per-action path hardlink-only.
+    ///
+    /// The returned [`ExecutableHardlinkSource`] pins the variant against
+    /// runtime eviction: eviction may drop the variant from its map at any
+    /// time, but the file is only deleted after the last outstanding source
+    /// for it is dropped. Callers must hold the source until their
+    /// `hard_link` from [`ExecutableHardlinkSource::path`] has completed.
     #[cfg(unix)]
     pub async fn get_executable_hardlink_source(
         &self,
         digest: &DigestInfo,
-    ) -> Result<OsString, Error> {
-        let variant_path = self.executable_variant_path(digest);
-
+    ) -> Result<ExecutableHardlinkSource, Error> {
         // Fast path: the variant already exists, so the caller can hardlink it
         // with no writable fd anywhere in sight.
-        if fs::metadata(&variant_path).await.is_ok() {
-            // Refresh LRU recency so an actively-reused variant is not the
-            // eviction victim of a concurrent insert. No-op when eviction is
-            // disabled or the entry was already reaped.
-            if let Some(map) = &self.executable_evicting_map {
-                map.get(digest).await;
-            }
-            return Ok(variant_path);
+        if let Some(source) = self.find_existing_executable_variant(digest).await {
+            return Ok(source);
         }
 
         // Single-flight: exactly one task ever opens a writable fd for this
@@ -1082,53 +1189,73 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         let _guard = lock.lock().await;
 
         // Re-check: another task may have constructed it while we waited.
-        if fs::metadata(&variant_path).await.is_ok() {
+        if let Some(source) = self.find_existing_executable_variant(digest).await {
             self.forget_executable_lock(digest);
-            if let Some(map) = &self.executable_evicting_map {
-                map.get(digest).await;
-            }
-            return Ok(variant_path);
+            return Ok(source);
         }
+
+        // Tracked variants get a unique file name so a variant recreated
+        // after an eviction never reuses the path of a doomed predecessor
+        // still pinned by an in-flight user (whose deferred delete would
+        // otherwise reap the successor's file). The canonical name is kept
+        // when eviction is disabled: with no map to index variants, the
+        // stable path is what makes the fast-path existence check work.
+        let variant_path = if self.executable_evicting_map.is_some() {
+            self.unique_executable_variant_path(digest)
+        } else {
+            self.executable_variant_path(digest)
+        };
 
         let result = self.create_executable_variant(digest, &variant_path).await;
 
         // The digest may have been evicted mid-copy: its eviction callback ran
-        // before the rename published the variant, so nothing owns the file
-        // anymore. This orphans the variant from eviction accounting, but the
-        // race is rare enough (needs an eviction to land in the narrow window
-        // between rename and this check, on a digest's first-ever variant
-        // materialization) that it's a self-limiting leak, not a systemic one
-        // — cheaper to log and let this action succeed with the still-valid
-        // file than to fail an otherwise-successful action over it.
+        // before the rename published the variant, so that callback saw
+        // nothing to clean up. Benign when variants are tracked — the insert
+        // below makes the executable eviction policy own the file. When
+        // untracked, nothing owns the file anymore and it leaks until the
+        // startup wipe, but the race is rare enough (needs an eviction to land
+        // in the narrow window between rename and this check, on a digest's
+        // first-ever variant materialization) that it's a self-limiting leak,
+        // not a systemic one — cheaper to log and let this action succeed with
+        // the still-valid file than to fail an otherwise-successful action
+        // over it.
         if result.is_ok() && self.evicting_map.get(&digest.into()).await.is_none() {
             warn!(
                 %digest,
                 ?variant_path,
-                "Digest evicted while materializing its executable variant; \
-                 variant is now untracked by eviction accounting"
+                "Digest evicted while materializing its executable variant"
             );
         }
 
         // Drop the per-digest lock entry regardless of outcome so the map
         // cannot grow unbounded; a concurrent waiter already cloned the Arc.
-        self.forget_executable_lock(digest);
-        let size_on_disk = result?;
+        let size_on_disk = match result {
+            Ok(size_on_disk) => size_on_disk,
+            Err(err) => {
+                self.forget_executable_lock(digest);
+                return Err(err);
+            }
+        };
         // Track the freshly-created variant so it counts against the
-        // executable eviction policy and gets reclaimed LRU-style. Inserting
-        // here (after the single-flight guard) means each variant is accounted
-        // exactly once. When eviction is disabled the variant is left untracked
-        // and only the startup wipe reclaims it (historical behavior).
+        // executable eviction policy and gets reclaimed LRU-style once its
+        // last user drops it. Inserting while still holding the single-flight
+        // guard means each variant is accounted exactly once and waiters find
+        // it in the map. Even if this insert immediately evicts the entry
+        // again (e.g. the variant alone exceeds the policy), the source
+        // returned below keeps the file alive for this caller. When eviction
+        // is disabled the variant is left untracked and only the startup wipe
+        // reclaims it (historical behavior).
         if let Some(map) = &self.executable_evicting_map {
-            map.insert(
-                *digest,
-                Arc::new(ExecutableVariantEntry {
-                    path: variant_path.clone(),
-                    size_on_disk,
-                }),
-            )
-            .await;
+            let entry = Arc::new(ExecutableVariantEntry {
+                path: variant_path,
+                size_on_disk,
+            });
+            map.insert(*digest, entry.clone()).await;
+            self.forget_executable_lock(digest);
+            return Ok(ExecutableHardlinkSource::tracked(entry));
         }
-        Ok(variant_path)
+        self.forget_executable_lock(digest);
+        Ok(ExecutableHardlinkSource::untracked(variant_path))
     }
 
     /// Non-unix has no executable bit and no `ETXTBSY`, so just hardlink the
@@ -1137,11 +1264,12 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
     pub async fn get_executable_hardlink_source(
         &self,
         digest: &DigestInfo,
-    ) -> Result<OsString, Error> {
+    ) -> Result<ExecutableHardlinkSource, Error> {
         let file_entry = self.get_file_entry_for_digest(digest).await?;
-        file_entry
+        let path = file_entry
             .get_file_path_locked(|p| async move { Ok(p) })
-            .await
+            .await?;
+        Ok(ExecutableHardlinkSource { path })
     }
 
     #[cfg(unix)]
