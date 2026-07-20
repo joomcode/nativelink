@@ -40,7 +40,7 @@ fn parse_ft_search_total(value: Value) -> Result<usize, Error> {
     match value {
         Value::Array(arr) if !arr.is_empty() => int_to_document_count(&arr[0]),
         Value::Map(ref entries) => {
-            for (k, v) in entries.iter() {
+            for (k, v) in entries {
                 let Value::SimpleString(key) = k else {
                     continue;
                 };

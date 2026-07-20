@@ -488,6 +488,6 @@ where
     let s = String::deserialize(deserializer)?;
     let expanded = shellexpand::env(&s).map_err(de::Error::custom)?;
 
-    let quoted = format!("\"{}\"", expanded);
+    let quoted = format!("\"{expanded}\"");
     serde_json5::from_str(&quoted).map_err(de::Error::custom)
 }

@@ -249,7 +249,7 @@ impl SortedAwaitedActions {
 
     const fn btree_for_countable_stage(
         &mut self,
-        stage: &CountableActionStage,
+        stage: CountableActionStage,
     ) -> &mut BTreeSet<SortedAwaitedAction> {
         match stage {
             CountableActionStage::Queued => &mut self.queued,
@@ -593,7 +593,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync> AwaitedActionDbI
 
     fn count_actions(&mut self, stage: CountableActionStage) -> usize {
         self.sorted_action_info_hash_keys
-            .btree_for_countable_stage(&stage)
+            .btree_for_countable_stage(stage)
             .len()
     }
 

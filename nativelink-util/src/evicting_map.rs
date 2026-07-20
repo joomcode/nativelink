@@ -635,6 +635,10 @@ where
         self.state.lock().store_len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn inner_insert_many<It>(
         &self,
         state: &mut State<K, Q, T, C>,

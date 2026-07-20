@@ -110,10 +110,7 @@ impl MockWorkerApiClient {
             .expect("Could not receive msg in mpsc")
         {
             WorkerClientApiCalls::ConnectWorker(req) => req,
-            req @ WorkerClientApiCalls::ExecutionResponse(_) => {
-                panic!("expect_connect_worker expected ConnectWorker, got : {req:?}")
-            }
-            req @ WorkerClientApiCalls::GoingAway(_) => {
+            req @ (WorkerClientApiCalls::ExecutionResponse(_) | WorkerClientApiCalls::GoingAway(_)) => {
                 panic!("expect_connect_worker expected ConnectWorker, got : {req:?}")
             }
         };
@@ -134,10 +131,7 @@ impl MockWorkerApiClient {
             .expect("Could not receive msg in mpsc")
         {
             WorkerClientApiCalls::ExecutionResponse(req) => req,
-            req @ WorkerClientApiCalls::ConnectWorker(_) => {
-                panic!("expect_execution_response expected ExecutionResponse, got : {req:?}")
-            }
-            req @ WorkerClientApiCalls::GoingAway(_) => {
+            req @ (WorkerClientApiCalls::ConnectWorker(_) | WorkerClientApiCalls::GoingAway(_)) => {
                 panic!("expect_execution_response expected ExecutionResponse, got : {req:?}")
             }
         };
@@ -155,10 +149,7 @@ impl MockWorkerApiClient {
             .expect("Could not receive msg in mpsc")
         {
             WorkerClientApiCalls::GoingAway(req) => req,
-            req @ WorkerClientApiCalls::ConnectWorker(_) => {
-                panic!("expect_going_away expected GoingAway, got : {req:?}")
-            }
-            req @ WorkerClientApiCalls::ExecutionResponse(_) => {
+            req @ (WorkerClientApiCalls::ConnectWorker(_) | WorkerClientApiCalls::ExecutionResponse(_)) => {
                 panic!("expect_going_away expected GoingAway, got : {req:?}")
             }
         };
@@ -184,10 +175,7 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
             .expect("Could not receive msg in mpsc")
         {
             WorkerClientApiReturns::ConnectWorker(result) => result,
-            resp @ WorkerClientApiReturns::ExecutionResponse(_) => {
-                panic!("connect_worker expected ConnectWorker response, received {resp:?}")
-            }
-            resp @ WorkerClientApiReturns::GoingAway(_) => {
+            resp @ (WorkerClientApiReturns::ExecutionResponse(_) | WorkerClientApiReturns::GoingAway(_)) => {
                 panic!("connect_worker expected ConnectWorker response, received {resp:?}")
             }
         }
@@ -214,10 +202,7 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
             .expect("Could not receive msg in mpsc")
         {
             WorkerClientApiReturns::GoingAway(result) => result,
-            resp @ WorkerClientApiReturns::ConnectWorker(_) => {
-                panic!("going_away expected GoingAway response, received {resp:?}")
-            }
-            resp @ WorkerClientApiReturns::ExecutionResponse(_) => {
+            resp @ (WorkerClientApiReturns::ConnectWorker(_) | WorkerClientApiReturns::ExecutionResponse(_)) => {
                 panic!("going_away expected GoingAway response, received {resp:?}")
             }
         }
@@ -234,10 +219,7 @@ impl WorkerApiClientTrait for MockWorkerApiClient {
             .expect("Could not receive msg in mpsc")
         {
             WorkerClientApiReturns::ExecutionResponse(result) => result,
-            resp @ WorkerClientApiReturns::ConnectWorker(_) => {
-                panic!("execution_response expected ExecutionResponse response, received {resp:?}")
-            }
-            resp @ WorkerClientApiReturns::GoingAway(_) => {
+            resp @ (WorkerClientApiReturns::ConnectWorker(_) | WorkerClientApiReturns::GoingAway(_)) => {
                 panic!("execution_response expected ExecutionResponse response, received {resp:?}")
             }
         }

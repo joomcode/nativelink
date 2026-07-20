@@ -306,7 +306,7 @@ impl ConnectionManagerWorker {
                 |err| Err((identifier, err)),
                 |channel| {
                     Ok(EstablishedChannel {
-                        channel: channel.into(),
+                        channel,
                         identifier,
                     })
                 },

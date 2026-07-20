@@ -1022,7 +1022,7 @@ where
             .search_by_index_prefix(prefix)
             .await
             .err_tip(|| "In RedisAwaitedActionDb::get_queued_actions")?
-            .map_ok(|awaited_action| Arc::new(AwaitedAction::from(awaited_action)))
+            .map_ok(Arc::new)
             .try_collect()
             .await
             .err_tip(|| "In RedisAwaitedActionDb::get_queued_actions")?;
