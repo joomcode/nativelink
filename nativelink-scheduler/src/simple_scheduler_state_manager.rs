@@ -74,7 +74,11 @@ impl SchedulerMetrics {
         }
     }
 
-    pub fn record_stage_transition(&self, from_stage: Option<ActionStage>, to_stage: ActionStage) {
+    pub fn record_stage_transition(
+        &self,
+        from_stage: Option<&ActionStage>,
+        to_stage: &ActionStage,
+    ) {
         if let Some(from) = from_stage {
             let from_attrs = self.attrs_for_stage(from);
             EXECUTION_METRICS.execution_active_count.add(-1, from_attrs);
@@ -111,7 +115,7 @@ impl SchedulerMetrics {
         EXECUTION_METRICS.execution_completed_count.add(1, attrs);
     }
 
-    fn attrs_for_stage(&self, stage: ActionStage) -> &[KeyValue] {
+    fn attrs_for_stage(&self, stage: &ActionStage) -> &[KeyValue] {
         match stage {
             ActionStage::Unknown => self.attrs.unknown(),
             ActionStage::CacheCheck => self.attrs.cache_check(),
@@ -135,7 +139,7 @@ impl SchedulerMetrics {
 
     fn record_actions_count(&self, countByStage: HashMap<CountableActionStage, u64>) {
         for (stage, count) in countByStage {
-            let attrs = self.attrs_for_stage(match stage {
+            let attrs = self.attrs_for_stage(&match stage {
                 CountableActionStage::Queued => ActionStage::Queued,
                 CountableActionStage::Executing => ActionStage::Executing,
                 CountableActionStage::Completed => {
@@ -451,6 +455,10 @@ where
     queued_actions_tracker: Arc<QueuedActionsTracker<T, I, NowFn>>,
 }
 
+/// Per-platform-properties-set queued action count and its OTEL attributes,
+/// for the `execution_queued_actions_count` observable gauge.
+type QueuedActionsByPlatformProperties = Vec<(u64, Vec<KeyValue>)>;
+
 #[derive(Debug)]
 struct QueuedActionsTracker<T, I, NowFn>
 where
@@ -459,7 +467,7 @@ where
     NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
 {
     simple_scheduler_state_manager: Weak<SimpleSchedulerStateManager<T, I, NowFn>>,
-    queued_actions: Arc<tokio::sync::Mutex<Vec<(u64, Vec<KeyValue>)>>>,
+    queued_actions: Arc<tokio::sync::Mutex<QueuedActionsByPlatformProperties>>,
 }
 
 impl<T, I, NowFn> QueuedActionsTracker<T, I, NowFn>
@@ -535,6 +543,7 @@ where
     I: InstantWrapper,
     NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_job_retries: usize,
         no_event_action_timeout: Duration,
@@ -591,7 +600,7 @@ where
             self.record_actions_count().await;
             // Record the stage transition
             self.scheduler_metrics
-                .record_stage_transition(Some(previous_stage.clone()), new_stage.clone());
+                .record_stage_transition(Some(previous_stage), new_stage);
 
             // Record queue time when transitioning from Queued to Executing
             if matches!(previous_stage, ActionStage::Queued)
@@ -638,18 +647,18 @@ where
                         EXECUTION_METRICS.execution_stage_duration.record(
                             fetch_duration.as_secs_f64(),
                             self.scheduler_metrics
-                                .attrs_for_stage(ActionStage::CacheCheck),
+                                .attrs_for_stage(&ActionStage::CacheCheck),
                         );
 
                         EXECUTION_METRICS.execution_stage_duration.record(
                             queue_duration.as_secs_f64(),
-                            self.scheduler_metrics.attrs_for_stage(ActionStage::Queued),
+                            self.scheduler_metrics.attrs_for_stage(&ActionStage::Queued),
                         );
 
                         EXECUTION_METRICS.execution_stage_duration.record(
                             execution_duration.as_secs_f64(),
                             self.scheduler_metrics
-                                .attrs_for_stage(ActionStage::Executing),
+                                .attrs_for_stage(&ActionStage::Executing),
                         );
 
                         EXECUTION_METRICS
@@ -762,10 +771,8 @@ where
                         Ok(()) => {
                             // Record client timeout metrics
                             self.scheduler_metrics.record_timeout();
-                            self.scheduler_metrics.record_stage_transition(
-                                Some(previous_stage.clone()),
-                                state.stage.clone(),
-                            );
+                            self.scheduler_metrics
+                                .record_stage_transition(Some(&previous_stage), &state.stage);
                             break;
                         }
                         Err(err) => err,
@@ -1318,7 +1325,7 @@ where
         // Record metrics for new action entering the queue
         if result.is_ok() {
             self.scheduler_metrics
-                .record_stage_transition(None, ActionStage::Queued);
+                .record_stage_transition(None, &ActionStage::Queued);
             self.record_actions_count().await;
         }
 
@@ -1489,7 +1496,7 @@ where
             self.scheduler_metrics.record_actions_count(
                 count
                     .iter()
-                    .map(|(stage, count)| (stage.clone(), *count as u64))
+                    .map(|(stage, count)| (*stage, *count as u64))
                     .collect(),
             );
         }

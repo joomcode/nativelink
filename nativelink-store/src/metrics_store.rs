@@ -46,13 +46,10 @@ impl MetricsStore {
 
             STORE_METRICS
                 .store_size
-                .record(fs_store.get_len(), &attrs.store_size());
+                .record(fs_store.get_len(), attrs.store_size());
         }
 
-        Arc::new(Self {
-            inner: inner.clone(),
-            attrs: attrs.clone(),
-        })
+        Arc::new(Self { inner, attrs })
     }
 }
 
@@ -70,17 +67,17 @@ impl StoreDriver for MetricsStore {
             if res.is_some() {
                 STORE_METRICS
                     .store_operations
-                    .add(1, &self.attrs.cache_hit());
+                    .add(1, self.attrs.cache_hit());
                 STORE_METRICS
                     .store_operation_duration
-                    .record(duration_ms as f64, &self.attrs.cache_hit());
+                    .record(duration_ms as f64, self.attrs.cache_hit());
             } else {
                 STORE_METRICS
                     .store_operations
-                    .add(1, &self.attrs.cache_miss());
+                    .add(1, self.attrs.cache_miss());
                 STORE_METRICS
                     .store_operation_duration
-                    .record(duration_ms as f64, &self.attrs.cache_miss());
+                    .record(duration_ms as f64, self.attrs.cache_miss());
             }
         }
 
@@ -99,23 +96,23 @@ impl StoreDriver for MetricsStore {
         if result.is_ok() {
             STORE_METRICS
                 .store_operations
-                .add(1, &self.attrs.write_success());
+                .add(1, self.attrs.write_success());
             STORE_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.write_success());
+                .record(duration_ms as f64, self.attrs.write_success());
         } else {
             STORE_METRICS
                 .store_operations
-                .add(1, &self.attrs.write_error());
+                .add(1, self.attrs.write_error());
             STORE_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.write_error());
+                .record(duration_ms as f64, self.attrs.write_error());
         }
 
         if let Some(fs_store) = self.inner.downcast_ref::<FilesystemStore>(None) {
             STORE_METRICS
                 .store_size
-                .record(fs_store.get_len(), &self.attrs.store_size());
+                .record(fs_store.get_len(), self.attrs.store_size());
         }
 
         result
@@ -134,17 +131,17 @@ impl StoreDriver for MetricsStore {
         if result.is_ok() {
             STORE_METRICS
                 .store_operations
-                .add(1, &self.attrs.read_success());
+                .add(1, self.attrs.read_success());
             STORE_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.read_success());
+                .record(duration_ms as f64, self.attrs.read_success());
         } else {
             STORE_METRICS
                 .store_operations
-                .add(1, &self.attrs.read_error());
+                .add(1, self.attrs.read_error());
             STORE_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.read_error());
+                .record(duration_ms as f64, self.attrs.read_error());
         }
 
         result
@@ -184,8 +181,4 @@ impl HealthStatusIndicator for MetricsStore {
     async fn check_health(&self, _namespace: Cow<'static, str>) -> HealthStatus {
         self.inner.check_health(_namespace).await
     }
-}
-
-fn should_add_remove_callback(store: Arc<Store>) -> bool {
-    store.downcast_ref::<FilesystemStore>(None).is_some()
 }
