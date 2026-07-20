@@ -729,6 +729,7 @@ pub struct ApiWorkerScheduler {
 }
 
 impl ApiWorkerScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         worker_state_manager: Arc<dyn WorkerStateManager>,
         platform_property_manager: Arc<PlatformPropertyManager>,

@@ -51,7 +51,7 @@ static QUEUED_ACTIONS_CALLBACK: OnceLock<QueuedActionsCallback> = OnceLock::new(
 /// ```
 pub fn register_queued_actions_callback(callback: QueuedActionsCallback) {
     assert!(
-        !QUEUED_ACTIONS_CALLBACK.set(callback).is_err(),
+        QUEUED_ACTIONS_CALLBACK.set(callback).is_ok(),
         "Queued actions callback can only be registered once"
     );
 }
@@ -1475,7 +1475,7 @@ pub static RUNNING_ACTIONS_METRICS: LazyLock<RunningActionsMetrics> = LazyLock::
             .f64_histogram("running_actions_upload_stderr_duration")
             .with_description("Duration of upload_stderr operations")
             .with_unit("ms")
-            .with_boundaries(duration_boundaries.clone())
+            .with_boundaries(duration_boundaries)
             .build(),
 
         task_timeouts: meter
@@ -1694,29 +1694,29 @@ pub enum StoreType {
 impl Display for StoreType {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
-            StoreType::Azure => write!(f, "azure"),
-            StoreType::Filesystem => write!(f, "filesystem"),
-            StoreType::S3 => write!(f, "s3"),
-            StoreType::Grpc => write!(f, "grpc"),
-            StoreType::Mongo => write!(f, "mongo"),
-            StoreType::Redis => write!(f, "redis"),
-            StoreType::Gcs => write!(f, "gcs"),
-            StoreType::Oci => write!(f, "oci"),
-            StoreType::OntapS3 => write!(f, "ontap_s3"),
-            StoreType::OntapS3ExistenceCache => write!(f, "ontap_s3_existence_cache"),
-            StoreType::Memory => write!(f, "memory"),
-            StoreType::Noop => write!(f, "noop"),
-            StoreType::Compression => write!(f, "compression"),
-            StoreType::Dedup => write!(f, "dedup"),
-            StoreType::ExistenceCache => write!(f, "existence_cache"),
-            StoreType::FastSlow => write!(f, "fast_slow"),
-            StoreType::SizePartitioning => write!(f, "size_partitioning"),
-            StoreType::CompletenessChecking => write!(f, "completeness_checking"),
-            StoreType::Verify => write!(f, "verify"),
-            StoreType::R2 => write!(f, "r2"),
-            StoreType::Ref => write!(f, "ref"),
-            StoreType::Shard => write!(f, "shard"),
-            StoreType::Metrics => write!(f, "metrics"),
+            Self::Azure => write!(f, "azure"),
+            Self::Filesystem => write!(f, "filesystem"),
+            Self::S3 => write!(f, "s3"),
+            Self::Grpc => write!(f, "grpc"),
+            Self::Mongo => write!(f, "mongo"),
+            Self::Redis => write!(f, "redis"),
+            Self::Gcs => write!(f, "gcs"),
+            Self::Oci => write!(f, "oci"),
+            Self::OntapS3 => write!(f, "ontap_s3"),
+            Self::OntapS3ExistenceCache => write!(f, "ontap_s3_existence_cache"),
+            Self::Memory => write!(f, "memory"),
+            Self::Noop => write!(f, "noop"),
+            Self::Compression => write!(f, "compression"),
+            Self::Dedup => write!(f, "dedup"),
+            Self::ExistenceCache => write!(f, "existence_cache"),
+            Self::FastSlow => write!(f, "fast_slow"),
+            Self::SizePartitioning => write!(f, "size_partitioning"),
+            Self::CompletenessChecking => write!(f, "completeness_checking"),
+            Self::Verify => write!(f, "verify"),
+            Self::R2 => write!(f, "r2"),
+            Self::Ref => write!(f, "ref"),
+            Self::Shard => write!(f, "shard"),
+            Self::Metrics => write!(f, "metrics"),
         }
     }
 }
