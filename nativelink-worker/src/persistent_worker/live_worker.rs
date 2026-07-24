@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use nativelink_error::{Code, Error, ResultExt, make_err};
+use nativelink_util::fork_guard;
 use prost::Message as ProstMessage;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -77,7 +78,7 @@ impl LiveWorker {
     /// `working_dir`). `startup_args` are the flags that the worker is launched
     /// with once — these become part of the `WorkerKey`. The Bazel-conventional
     /// `--persistent_worker` flag is appended automatically.
-    pub fn spawn(
+    pub async fn spawn(
         executable: &Path,
         startup_args: &[String],
         wire_format: WireFormat,
@@ -132,7 +133,14 @@ impl LiveWorker {
             "Spawning persistent worker"
         );
 
-        let mut child = cmd.spawn().err_tip(|| {
+        // Hold the process-global fork guard across `spawn` so this child
+        // cannot inherit a writable fd on an about-to-be-executed inode across
+        // `fork` and later trigger `ETXTBSY`. See `nativelink_util::fork_guard`.
+        let mut child = {
+            let _fork_guard = fork_guard::spawn_guard().await;
+            cmd.spawn()
+        }
+        .err_tip(|| {
             format!(
                 "Spawning persistent worker {} with args {startup_args:?}",
                 executable.display()
@@ -445,6 +453,7 @@ mod tests {
             &path_env(),
             false,
         )
+        .await
         .unwrap();
         let start = Instant::now();
         worker.shutdown(Duration::from_millis(100)).await;
@@ -470,6 +479,7 @@ mod tests {
             &path_env(),
             false,
         )
+        .await
         .unwrap();
 
         let req = WorkRequest {
@@ -501,6 +511,7 @@ mod tests {
             &path_env(),
             false,
         )
+        .await
         .unwrap();
 
         let req = WorkRequest {
@@ -531,6 +542,7 @@ mod tests {
             &path_env(),
             false,
         )
+        .await
         .unwrap();
         let req = WorkRequest {
             request_id: 7,

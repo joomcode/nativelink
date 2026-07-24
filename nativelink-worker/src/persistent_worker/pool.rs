@@ -414,7 +414,8 @@ impl PersistentWorkerPool {
             working_dir,
             &key.env,
             self.inner.config.namespaced,
-        );
+        )
+        .await;
         let worker = match spawn_result {
             Ok(w) => w,
             Err(err) => {

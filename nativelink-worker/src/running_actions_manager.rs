@@ -76,7 +76,7 @@ use nativelink_util::metrics::{
 use nativelink_util::metrics_utils::CounterWithTime;
 use nativelink_util::store_trait::{Store, StoreLike, UploadSizeInfo};
 use nativelink_util::task::JoinHandleDropGuard;
-use nativelink_util::{background_spawn, spawn, spawn_blocking};
+use nativelink_util::{background_spawn, fork_guard, spawn, spawn_blocking};
 use opentelemetry::{KeyValue, metrics};
 use parking_lot::Mutex;
 use prost::Message;
@@ -3377,9 +3377,15 @@ impl RunningActionImpl {
         #[cfg(target_family = "unix")]
         command_builder.process_group(0);
 
-        let mut child_process = command_builder
-            .spawn()
-            .err_tip(|| format!("Could not execute command {args:?}"))?;
+        // Hold the process-global fork guard across `spawn` (the `fork`+`exec`).
+        // While held, no executable-variant copy can be materializing, so this
+        // forked child cannot inherit a writable fd on an about-to-be-executed
+        // inode and later trigger `ETXTBSY`. See `nativelink_util::fork_guard`.
+        let mut child_process = {
+            let _fork_guard = fork_guard::spawn_guard().await;
+            command_builder.spawn()
+        }
+        .err_tip(|| format!("Could not execute command {args:?}"))?;
         // Ours until the wait below collects it; the reaper leaves it alone.
         let _owned_child = crate::reaper::OwnedChild::new(child_process.id());
         let stdout_reader = child_process
