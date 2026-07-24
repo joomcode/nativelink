@@ -1007,6 +1007,25 @@ pub struct LocalWorkerConfig {
     /// Default: None (directory cache disabled)
     pub directory_cache: Option<DirectoryCacheConfig>,
 
+    /// Serialize executable-input materialization against process spawning to
+    /// eliminate a residual `ETXTBSY` ("Text file busy") race on execution.
+    ///
+    /// Materializing an executable input opens a brief writable file descriptor
+    /// on the executable's inode. That descriptor is `O_CLOEXEC` (closed on
+    /// `execve`) but is still inherited across `fork`, so a concurrently-spawned
+    /// action child can hold it through its fork→exec window; a racing `execve`
+    /// of that same executable then fails with `ETXTBSY`. When enabled, the
+    /// worker makes executable materialization and process spawning mutually
+    /// exclusive so no child is ever forked while such a descriptor is open.
+    ///
+    /// The cost is a brief spawn quiesce while an executable is first copied
+    /// (once per distinct executable); steady-state (warm cache) execution is
+    /// unaffected. Enable this only on workers that observe `ETXTBSY` failures.
+    ///
+    /// Default: False.
+    #[serde(default)]
+    pub enable_exec_fork_guard: bool,
+
     /// Whether to use namespaces to isolate the execution. This is only available
     /// on Linux. It is highly recommended as it avoids a number of issues with
     /// zombie processes and also provides additional hermeticity. If explicitly set

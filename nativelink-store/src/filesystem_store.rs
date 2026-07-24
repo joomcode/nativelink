@@ -41,6 +41,8 @@ use nativelink_util::common::{DigestInfo, fs};
 #[cfg(unix)]
 use nativelink_util::evicting_map::NoopRemove;
 use nativelink_util::evicting_map::{EvictingMap, EvictionSnapshot, LenEntry};
+#[cfg(unix)]
+use nativelink_util::fork_guard;
 use nativelink_util::fs::FileSlot;
 use nativelink_util::health_utils::{HealthRegistryBuilder, HealthStatus, HealthStatusIndicator};
 #[cfg(unix)]
@@ -1628,24 +1630,47 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         temp_owned.push(".tmp");
         let rename_fn = self.rename_fn;
 
-        // All of this is blocking std::fs; run it off the async runtime. The
-        // writable fd opened by `copy` is fully closed before the `rename`
-        // publishes the inode, so no reachable hardlink of the variant ever has
-        // an open writer.
-        spawn_blocking!(
-            "filesystem_store_executable_variant",
-            move || -> Result<(), Error> {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::copy(&src_path, &temp_owned).map_err(|e| {
-                    make_err!(Code::Internal, "executable-variant copy failed: {e:?}")
-                })?;
-                std::fs::set_permissions(&temp_owned, std::fs::Permissions::from_mode(0o555))
-                    .map_err(|e| {
+        // Copy phase — the only span with a writable fd open on the variant
+        // inode. `O_CLOEXEC` closes that fd on `execve` but NOT on `fork`, so a
+        // concurrently-spawned action child would otherwise inherit it across
+        // `fork` and hold it through its (namespace-widened) fork→exec window;
+        // a racing `execve` of a hardlink to this inode during that window
+        // fails with `ETXTBSY`. The fork guard makes this copy mutually
+        // exclusive with process spawning, so no child is ever forked while the
+        // fd is open. Held for exactly the copy, released before the
+        // (fd-free) publish below. See `nativelink_util::fork_guard`.
+        {
+            let _fork_guard = fork_guard::exec_write_guard().await;
+            let src_path = src_path.clone();
+            let temp_owned = temp_owned.clone();
+            spawn_blocking!(
+                "filesystem_store_executable_variant_copy",
+                move || -> Result<(), Error> {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::copy(&src_path, &temp_owned).map_err(|e| {
+                        make_err!(Code::Internal, "executable-variant copy failed: {e:?}")
+                    })?;
+                    std::fs::set_permissions(&temp_owned, std::fs::Permissions::from_mode(0o555))
+                        .map_err(|e| {
                         make_err!(
                             Code::Internal,
                             "executable-variant chmod 0o555 failed: {e:?}"
                         )
                     })?;
+                    Ok(())
+                }
+            )
+            .await
+            .err_tip(|| "executable-variant copy spawn_blocking join failed")??;
+        }
+
+        // Publish phase — no writable fd is open (the reopen is read-only), so
+        // it needs no fork guard. The writer fd from the copy above is already
+        // closed before the `rename` makes the inode reachable, so no reachable
+        // hardlink of the variant ever has an open writer.
+        spawn_blocking!(
+            "filesystem_store_executable_variant_publish",
+            move || -> Result<(), Error> {
                 // Belt-and-suspenders flush before publish. The `.exec`
                 // directory is cleared before executable variants are enabled,
                 // so durability is not needed across process restarts. The
@@ -1682,7 +1707,7 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             }
         )
         .await
-        .err_tip(|| "executable-variant spawn_blocking join failed")??;
+        .err_tip(|| "executable-variant publish spawn_blocking join failed")??;
         Ok(size_on_disk)
     }
 
