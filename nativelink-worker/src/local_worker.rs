@@ -592,6 +592,12 @@ pub async fn new_local_worker(
         .get_arc()
         .err_tip(|| "FastSlowStore's Arc doesn't exist")?;
 
+    // Opt in (process-wide, before any action runs) to serializing executable
+    // materialization against process spawning. Off by default; enable only on
+    // workers that observe `ETXTBSY` on execution. Governs both the store's
+    // executable-write side and this worker's spawn side at once.
+    nativelink_util::fork_guard::set_enabled(config.enable_exec_fork_guard);
+
     // Log warning about CAS configuration for multi-worker setups
     event!(
         Level::INFO,

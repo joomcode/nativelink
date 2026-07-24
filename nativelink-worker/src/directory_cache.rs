@@ -450,9 +450,49 @@ impl DirectoryCache {
             return Ok(());
         }
 
-        // Executable files need their own inode to carry the +x bit without
-        // mutating the shared CAS blob — copy, never hardlink.
+        // Executable files need the +x bit, which cannot live on the shared
+        // 0o444 CAS blob (chmoding it mutates the inode shared with the CAS
+        // and every other action that hardlinked it — the PR #2347 bug). On
+        // unix, hardlink the `FilesystemStore`'s per-digest 0o555 executable
+        // variant instead of copying the bytes here. The variant is created
+        // once per digest, off the hot path, with its writer fd fsync'd and
+        // closed before the file is ever reachable (see
+        // `FilesystemStore::get_executable_hardlink_source`), so no writable
+        // fd is ever open on the materialized inode.
+        //
+        // Copying in place (the historical behavior, still the fallback below)
+        // opens a writable fd via `tokio::fs::write` on the very inode that is
+        // then hardlinked into action work dirs and `execve`'d. `O_CLOEXEC`
+        // does not stop that fd being inherited across a concurrent action's
+        // `fork()`; if a racing `execve` of a hardlink to that inode lands in
+        // the child's fork→exec window, it fails with `ETXTBSY` ("Text file
+        // busy"). This mirrors `download_to_directory`'s executable hot path
+        // (`running_actions_manager.rs`).
         if file_node.is_executable {
+            #[cfg(unix)]
+            if let Some(filesystem_store) = &self.filesystem_store {
+                match self
+                    .hardlink_executable_variant(filesystem_store, &digest, &file_path)
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(e) if e.code == Code::NotFound => {
+                        // The blob is not in the filesystem tier (slow-store
+                        // only, or evicted). Fall through to fetch+write into a
+                        // private inode rather than failing the whole build.
+                        trace!(
+                            ?digest,
+                            ?file_path,
+                            "Executable blob not locally hardlinkable, copying instead"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // Fallback (non-unix, no `FilesystemStore` fast tier, or blob
+            // evicted): a private copy is acceptable — its inode is unshared,
+            // so `copy_file_to` closes the writer fd before this one action
+            // execs it and no other action ever links it.
             return self.copy_file_to(&digest, &file_path, true).await;
         }
 
@@ -518,6 +558,47 @@ impl DirectoryCache {
                 })
             })
             .await
+    }
+
+    /// Hardlinks the `FilesystemStore`'s per-digest **0o555** executable
+    /// variant for `digest` into `file_path`. Mirrors `download_to_directory`'s
+    /// executable hot path: populate the fast store, resolve the variant, then
+    /// `fs::hard_link` it — never opening a writable fd on the materialized
+    /// inode, so a concurrent action's `execve` of a hardlink to it cannot hit
+    /// `ETXTBSY`.
+    ///
+    /// The returned [`ExecutableHardlinkSource`] pins the variant against
+    /// runtime eviction; it is held until the `hard_link` completes so a racing
+    /// eviction cannot delete the variant file between path resolution and the
+    /// link (the `58421eac` deferred-deletion contract).
+    ///
+    /// Returns a `NotFound` error if the blob is not present in the filesystem
+    /// tier; callers fall back to fetch+write in that case.
+    #[cfg(unix)]
+    async fn hardlink_executable_variant(
+        &self,
+        filesystem_store: &FilesystemStore,
+        digest: &DigestInfo,
+        file_path: &Path,
+    ) -> Result<(), Error> {
+        // Ensure the blob is in the fast (filesystem) tier so the variant can
+        // be materialized from an on-disk 0o444 blob.
+        self.cas_store
+            .populate_fast_store(StoreKey::Digest(*digest))
+            .await
+            .err_tip(|| format!("Failed to populate fast store for {digest}"))?;
+
+        // `_source` pins the variant file until the hard_link below lands.
+        let source = filesystem_store
+            .get_executable_hardlink_source(digest)
+            .await
+            .err_tip(|| "Resolving executable hardlink source")?;
+        fs::hard_link(source.path(), file_path).await.err_tip(|| {
+            format!(
+                "Failed to hardlink executable variant into cache entry: {}",
+                file_path.display()
+            )
+        })
     }
 
     /// Fetches the blob for `digest` from the CAS and writes a private copy at
@@ -1351,6 +1432,106 @@ mod tests {
             cas_mode_after, cas_mode,
             "CAS blob mode must be untouched by the executable's private chmod"
         );
+
+        Ok(())
+    }
+
+    /// ETXTBSY regression: an executable in a cache entry must be a **hardlink
+    /// to the `FilesystemStore`'s shared 0o555 executable variant**, not a
+    /// fresh in-place copy. Copying opens a writable fd on the very inode that
+    /// is then hardlinked into action work dirs and `execve`'d; under
+    /// fork-heavy concurrency a racing action inherits that fd across `fork()`
+    /// and a concurrent `execve` fails with `ETXTBSY` ("Text file busy"). The
+    /// variant is created once, off the hot path, with its writer fd closed
+    /// before the file is reachable, so hardlinking it opens no writable fd.
+    ///
+    /// Sharing the variant inode is the observable proxy for "no writable fd
+    /// was opened on this inode": a copy would have a distinct inode from the
+    /// variant.
+    #[cfg(unix)]
+    #[nativelink_test]
+    async fn test_construct_executable_hardlinks_variant() -> Result<(), Error> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp_dir = TempDir::new().unwrap();
+        let cache_root = temp_dir.path().join("cache");
+        let (cas_store, slow_store) = make_fast_slow_store(&temp_dir).await;
+
+        let script = b"#!/bin/sh\necho ran\n";
+        let file_digest = upload_blob(&slow_store, 30, script).await;
+
+        let directory = ProtoDirectory {
+            files: vec![FileNode {
+                name: "run.sh".to_string(),
+                digest: Some(file_digest.into()),
+                is_executable: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut dir_data = Vec::new();
+        directory.encode(&mut dir_data).unwrap();
+        let dir_digest = upload_blob(&slow_store, 31, &dir_data).await;
+
+        let filesystem_store = cas_store
+            .fast_store()
+            .downcast_ref::<FilesystemStore>(None)
+            .unwrap()
+            .get_arc()
+            .unwrap();
+
+        // Resolve the raw 0o444 CAS blob inode up front so we can prove the
+        // cache entry is NOT a hardlink to it (executables can't share it).
+        cas_store
+            .populate_fast_store(StoreKey::Digest(file_digest))
+            .await?;
+        let blob_ino = filesystem_store
+            .get_file_entry_for_digest(&file_digest)
+            .await?
+            .get_file_path_locked(|p| async move { Ok(fs::metadata(&p).await?.ino()) })
+            .await?;
+
+        let config = DirectoryCacheConfig {
+            max_entries: 10,
+            max_size_bytes: 1024 * 1024,
+            cache_root,
+        };
+        let cache = DirectoryCache::new(config, cas_store).await?;
+
+        let dest = temp_dir.path().join("dest");
+        cache.get_or_create(dir_digest, &dest).await?;
+
+        // The variant now exists (construction created it); resolve its inode.
+        let variant_ino = {
+            let source = filesystem_store
+                .get_executable_hardlink_source(&file_digest)
+                .await?;
+            fs::metadata(source.path()).await?.ino()
+        };
+
+        let cache_entry_file = cache.get_cache_path(&dir_digest).join("run.sh");
+        let entry_meta = fs::metadata(&cache_entry_file).await?;
+
+        // The cache-entry executable shares the variant's inode (hardlink),
+        // proving no in-place writable-fd copy was performed.
+        assert_eq!(
+            entry_meta.ino(),
+            variant_ino,
+            "cache-entry executable must be hardlinked to the shared 0o555 variant"
+        );
+        // ...and is distinct from the raw 0o444 CAS blob inode.
+        assert_ne!(
+            entry_meta.ino(),
+            blob_ino,
+            "executable must not share the 0o444 CAS blob inode"
+        );
+        // The +x bit is present and content is byte-identical.
+        assert_ne!(
+            entry_meta.permissions().mode() & 0o111,
+            0,
+            "executable bit must be set"
+        );
+        assert_eq!(fs::read(&cache_entry_file).await?, script);
 
         Ok(())
     }
