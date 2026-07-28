@@ -21,6 +21,9 @@ use nativelink_proto::build::bazel::remote::execution::v2::RequestMetadata;
 use nativelink_proto::com::github::trace_machina::nativelink::events::{
     Event, event, request_event, response_event, stream_event,
 };
+use opentelemetry::Context;
+use opentelemetry::baggage::BaggageExt;
+use opentelemetry_semantic_conventions::attribute::ENDUSER_ID;
 use prost::Message;
 use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -40,6 +43,21 @@ pub fn request_metadata_from_baggage(value: &str) -> Result<RequestMetadata, Err
         .decode(value.as_bytes())
         .map_err(Error::from)?;
     RequestMetadata::decode(&*decoded).map_err(Error::from)
+}
+
+/// Reads the `enduser.id` identity from the current OpenTelemetry baggage.
+///
+/// Returns an empty string when the request carried no identity. Use this on
+/// paths that run in the client's request context but have no `OriginMetadata`
+/// at hand yet, e.g. when an action is first added to the scheduler.
+#[must_use]
+pub fn identity_from_current_context() -> String {
+    Context::map_current(|cx| {
+        cx.baggage()
+            .get(ENDUSER_ID)
+            .map(|value| value.as_str().to_string())
+            .unwrap_or_default()
+    })
 }
 
 /// Returns a unique ID for the given event.

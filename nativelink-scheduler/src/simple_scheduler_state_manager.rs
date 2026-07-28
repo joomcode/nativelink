@@ -32,17 +32,19 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::metrics::{
-    AgeBuckets, EXECUTION_INSTANCE, EXECUTION_METRICS, EXECUTION_RESULT, EXECUTION_STAGE,
-    ExecutionMetricAttrs, ExecutionResult, ExecutionStage, record_awaited_action_orphan,
-    record_dispatch_requeue, record_queue_retired, register_queued_actions_callback,
+    AgeBuckets, EXECUTION_IDENTITY, EXECUTION_INSTANCE, EXECUTION_METRICS, EXECUTION_RESULT,
+    EXECUTION_STAGE, ExecutionMetricAttrs, ExecutionResult, ExecutionStage, identity_label,
+    record_awaited_action_orphan, record_dispatch_requeue, record_queue_retired,
+    register_queued_actions_callback,
 };
 use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, MatchingEngineStateManager,
     OperationFilter, OperationStageFlags, OrderDirection, UpdateOperationType, WorkerStateManager,
 };
-use nativelink_util::origin_event::OriginMetadata;
+use nativelink_util::origin_event::{OriginMetadata, identity_from_current_context};
 use nativelink_util::platform_properties::PlatformProperties;
 use opentelemetry::KeyValue;
+use parking_lot::RwLock;
 use tracing::{debug, info, trace, warn};
 
 use super::awaited_action_db::{
@@ -125,9 +127,11 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
         .instance_name()
         .as_str();
     let priority = Some(awaited_action.action_info().priority);
+    let identity = identity_of(awaited_action);
 
     // Build base attributes for metrics
-    let mut attrs = nativelink_util::metrics::make_execution_attributes(instance_name, priority);
+    let mut attrs =
+        nativelink_util::metrics::make_execution_attributes(instance_name, identity, priority);
 
     // Add stage attribute
     let execution_stage: ExecutionStage = (&action_state.stage).into();
@@ -149,6 +153,7 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
             nativelink_util::metrics::record_completed_execution_metrics(
                 action_result,
                 instance_name,
+                identity,
                 priority,
             );
         }
@@ -162,7 +167,7 @@ fn record_execution_metrics(awaited_action: &AwaitedAction, is_retry: bool) {
     // A failed attempt that re-queued the action counts as a retry.
     if is_retry {
         let retry_attrs =
-            nativelink_util::metrics::make_execution_attributes(instance_name, priority);
+            nativelink_util::metrics::make_execution_attributes(instance_name, identity, priority);
         EXECUTION_METRICS.execution_retry_count.add(1, &retry_attrs);
     }
 }
@@ -178,7 +183,13 @@ pub(crate) const fn is_lost_record(err: &Error) -> bool {
 
 #[derive(Debug)]
 pub struct SchedulerMetrics {
+    /// Attributes without an identity, for metrics that aggregate over the
+    /// whole queue rather than describing one client's action.
     attrs: ExecutionMetricAttrs,
+    /// Attributes per `EXECUTION_IDENTITY` label, built on first use. Bounded
+    /// by `identity_label`, which collapses unexpected identities into a single
+    /// label value.
+    attrs_by_identity: RwLock<HashMap<&'static str, Arc<ExecutionMetricAttrs>>>,
     instance_name: String,
 }
 
@@ -189,79 +200,122 @@ impl SchedulerMetrics {
         let base_attrs = vec![KeyValue::new(EXECUTION_INSTANCE, instance_name.clone())];
         Self {
             attrs: ExecutionMetricAttrs::new(&base_attrs),
+            attrs_by_identity: RwLock::new(HashMap::new()),
             instance_name,
         }
     }
 
-    pub fn record_stage_transition(&self, from_stage: Option<ActionStage>, to_stage: ActionStage) {
+    /// Returns the attribute sets for `identity`, creating them on first use.
+    ///
+    /// `identity` is the raw `enduser.id` of the requesting client; the label it
+    /// maps to is bounded by [`identity_label`].
+    #[must_use]
+    pub fn attrs_for_identity(&self, identity: &str) -> Arc<ExecutionMetricAttrs> {
+        let label = identity_label(identity);
+        // Bound the read guard to this statement so it is released before the
+        // write lock is taken below.
+        let cached = self.attrs_by_identity.read().get(label).cloned();
+        if let Some(attrs) = cached {
+            return attrs;
+        }
+        self.attrs_by_identity
+            .write()
+            .entry(label)
+            .or_insert_with(|| {
+                Arc::new(ExecutionMetricAttrs::new(&[
+                    KeyValue::new(EXECUTION_INSTANCE, self.instance_name.clone()),
+                    KeyValue::new(EXECUTION_IDENTITY, label),
+                ]))
+            })
+            .clone()
+    }
+
+    pub fn record_stage_transition(
+        &self,
+        identity: &str,
+        from_stage: Option<&ActionStage>,
+        to_stage: &ActionStage,
+    ) {
+        let attrs = self.attrs_for_identity(identity);
         if let Some(from) = from_stage {
-            let from_attrs = self.attrs_for_stage(from);
+            let from_attrs = Self::attrs_for_stage(&attrs, from);
             EXECUTION_METRICS.execution_active_count.add(-1, from_attrs);
         }
 
-        let to_attrs = self.attrs_for_stage(to_stage);
+        let to_attrs = Self::attrs_for_stage(&attrs, to_stage);
         EXECUTION_METRICS.execution_active_count.add(1, to_attrs);
         EXECUTION_METRICS
             .execution_stage_transitions
             .add(1, to_attrs);
     }
 
-    pub fn record_queue_time(&self, duration_secs: f64) {
+    pub fn record_queue_time(&self, identity: &str, duration_secs: f64) {
         EXECUTION_METRICS
             .execution_queue_time
-            .record(duration_secs, self.attrs.queued());
+            .record(duration_secs, self.attrs_for_identity(identity).queued());
     }
 
-    pub fn record_completion(&self, result: ExecutionResult) {
-        let attrs = self.attrs_for_completion_result(result);
+    pub fn record_completion(&self, identity: &str, result: ExecutionResult) {
+        let identity_attrs = self.attrs_for_identity(identity);
+        let attrs = Self::attrs_for_completion_result(&identity_attrs, result);
         EXECUTION_METRICS.execution_completed_count.add(1, attrs);
 
         EXECUTION_METRICS.execution_active_count.add(-1, attrs);
     }
 
-    pub fn record_retry(&self) {
+    pub fn record_retry(&self, identity: &str) {
         EXECUTION_METRICS
             .execution_retry_count
-            .add(1, self.attrs.queued());
+            .add(1, self.attrs_for_identity(identity).queued());
     }
 
-    pub fn record_timeout(&self) {
-        let attrs = self.attrs.completed_timeout();
-        EXECUTION_METRICS.execution_completed_count.add(1, attrs);
+    pub fn record_timeout(&self, identity: &str) {
+        let identity_attrs = self.attrs_for_identity(identity);
+        EXECUTION_METRICS
+            .execution_completed_count
+            .add(1, identity_attrs.completed_timeout());
     }
 
-    fn attrs_for_stage(&self, stage: ActionStage) -> &[KeyValue] {
+    fn attrs_for_stage<'a>(attrs: &'a ExecutionMetricAttrs, stage: &ActionStage) -> &'a [KeyValue] {
         match stage {
-            ActionStage::Unknown => self.attrs.unknown(),
-            ActionStage::CacheCheck => self.attrs.cache_check(),
-            ActionStage::Queued => self.attrs.queued(),
-            ActionStage::Executing => self.attrs.executing(),
+            ActionStage::Unknown => attrs.unknown(),
+            ActionStage::CacheCheck => attrs.cache_check(),
+            ActionStage::Queued => attrs.queued(),
+            ActionStage::Executing => attrs.executing(),
             ActionStage::Completed(_) | ActionStage::CompletedFromCache(_) => {
-                self.attrs.completed_success()
+                attrs.completed_success()
             }
         }
     }
 
-    fn attrs_for_completion_result(&self, result: ExecutionResult) -> &[KeyValue] {
+    fn attrs_for_completion_result(
+        attrs: &ExecutionMetricAttrs,
+        result: ExecutionResult,
+    ) -> &[KeyValue] {
         match result {
-            ExecutionResult::Success => self.attrs.completed_success(),
-            ExecutionResult::Failure => self.attrs.completed_failure(),
-            ExecutionResult::Cancelled => self.attrs.completed_cancelled(),
-            ExecutionResult::Timeout => self.attrs.completed_timeout(),
-            ExecutionResult::CacheHit => self.attrs.completed_cache_hit(),
+            ExecutionResult::Success => attrs.completed_success(),
+            ExecutionResult::Failure => attrs.completed_failure(),
+            ExecutionResult::Cancelled => attrs.completed_cancelled(),
+            ExecutionResult::Timeout => attrs.completed_timeout(),
+            ExecutionResult::CacheHit => attrs.completed_cache_hit(),
         }
     }
 
+    // Note: this counts the whole action database, so it is reported without an
+    // identity attribute.
     fn record_actions_count(&self, countByStage: HashMap<CountableActionStage, u64>) {
         for (stage, count) in countByStage {
-            let attrs = self.attrs_for_stage(match stage {
-                CountableActionStage::Queued => ActionStage::Queued,
-                CountableActionStage::Executing => ActionStage::Executing,
-                CountableActionStage::Completed => {
-                    let action_result = ActionResult::default();
-                    ActionStage::Completed(action_result)
-                }
-            });
+            let attrs = Self::attrs_for_stage(
+                &self.attrs,
+                &match stage {
+                    CountableActionStage::Queued => ActionStage::Queued,
+                    CountableActionStage::Executing => ActionStage::Executing,
+                    CountableActionStage::Completed => {
+                        let action_result = ActionResult::default();
+                        ActionStage::Completed(action_result)
+                    }
+                },
+            );
 
             EXECUTION_METRICS
                 .execution_actions_count
@@ -296,6 +350,16 @@ impl SchedulerMetrics {
             _ => None,
         }
     }
+}
+
+/// The requesting client's identity, used to attribute execution metrics.
+///
+/// Returns an empty string when the action carried no `enduser.id` baggage,
+/// which `identity_label` reports as `EXECUTION_IDENTITY_UNKNOWN`.
+fn identity_of(awaited_action: &AwaitedAction) -> &str {
+    awaited_action
+        .maybe_origin_metadata()
+        .map_or("", |metadata| metadata.identity.as_str())
 }
 
 /// Simple struct that implements the `ActionStateResult` trait and always returns an error.
@@ -758,6 +822,7 @@ where
     /// This handles stage transitions, retries, completions, and timing metrics.
     async fn record_action_update_metrics(
         &self,
+        identity: &str,
         previous_stage: &ActionStage,
         new_stage: &ActionStage,
         is_retry: bool,
@@ -767,8 +832,11 @@ where
         if core::mem::discriminant(previous_stage) != core::mem::discriminant(new_stage) {
             self.record_actions_count().await;
             // Record the stage transition
-            self.scheduler_metrics
-                .record_stage_transition(Some(previous_stage.clone()), new_stage.clone());
+            self.scheduler_metrics.record_stage_transition(
+                identity,
+                Some(previous_stage),
+                new_stage,
+            );
 
             // Record queue time when transitioning from Queued to Executing
             if matches!(previous_stage, ActionStage::Queued)
@@ -776,13 +844,13 @@ where
                 && let Ok(queue_duration) = action_insert_timestamp.elapsed()
             {
                 self.scheduler_metrics
-                    .record_queue_time(queue_duration.as_secs_f64());
+                    .record_queue_time(identity, queue_duration.as_secs_f64());
             }
 
             // Record completion metrics
             if new_stage.is_finished() {
                 if let Some(result) = SchedulerMetrics::result_from_stage(new_stage) {
-                    self.scheduler_metrics.record_completion(result);
+                    self.scheduler_metrics.record_completion(identity, result);
                 }
 
                 if new_stage.has_action_result() && matches!(new_stage, ActionStage::Completed(_)) {
@@ -812,26 +880,36 @@ where
                             .duration_since(execution_metadata.execution_start_timestamp)
                             .unwrap_or(Duration::ZERO);
 
+                        let identity_attrs = self.scheduler_metrics.attrs_for_identity(identity);
+
                         EXECUTION_METRICS.execution_stage_duration.record(
                             fetch_duration.as_secs_f64(),
-                            self.scheduler_metrics
-                                .attrs_for_stage(ActionStage::CacheCheck),
+                            SchedulerMetrics::attrs_for_stage(
+                                &identity_attrs,
+                                &ActionStage::CacheCheck,
+                            ),
                         );
 
                         EXECUTION_METRICS.execution_stage_duration.record(
                             queue_duration.as_secs_f64(),
-                            self.scheduler_metrics.attrs_for_stage(ActionStage::Queued),
+                            SchedulerMetrics::attrs_for_stage(
+                                &identity_attrs,
+                                &ActionStage::Queued,
+                            ),
                         );
 
                         EXECUTION_METRICS.execution_stage_duration.record(
                             execution_duration.as_secs_f64(),
-                            self.scheduler_metrics
-                                .attrs_for_stage(ActionStage::Executing),
+                            SchedulerMetrics::attrs_for_stage(
+                                &identity_attrs,
+                                &ActionStage::Executing,
+                            ),
                         );
 
-                        EXECUTION_METRICS
-                            .execution_total_duration
-                            .record(total_execution_duration.as_secs_f64(), &[]);
+                        EXECUTION_METRICS.execution_total_duration.record(
+                            total_execution_duration.as_secs_f64(),
+                            identity_attrs.base(),
+                        );
                     }
                 }
             }
@@ -839,7 +917,7 @@ where
 
         // Record retry metric
         if is_retry {
-            self.scheduler_metrics.record_retry();
+            self.scheduler_metrics.record_retry(identity);
         }
     }
 
@@ -1296,6 +1374,8 @@ where
                     };
                     let previous_stage = new_awaited_action.state().stage.clone();
                     new_awaited_action.worker_set_state(state.clone(), (self.now_fn)().now());
+                    // Captured before the update consumes `new_awaited_action`.
+                    let identity = identity_of(&new_awaited_action).to_string();
                     let err = match self
                         .action_db
                         .update_awaited_action(new_awaited_action)
@@ -1303,10 +1383,11 @@ where
                     {
                         Ok(()) => {
                             // Record client timeout metrics
-                            self.scheduler_metrics.record_timeout();
+                            self.scheduler_metrics.record_timeout(&identity);
                             self.scheduler_metrics.record_stage_transition(
-                                Some(previous_stage.clone()),
-                                state.stage.clone(),
+                                &identity,
+                                Some(&previous_stage),
+                                &state.stage,
                             );
                             break;
                         }
@@ -1461,7 +1542,8 @@ where
         );
 
         // Record timeout metric
-        self.scheduler_metrics.record_timeout();
+        self.scheduler_metrics
+            .record_timeout(identity_of(&awaited_action));
 
         self.assign_operation(
             operation_id,
@@ -1799,6 +1881,7 @@ where
 
             // Record metrics for the stage transition
             self.record_action_update_metrics(
+                identity_of(&awaited_action),
                 &previous_stage,
                 &stage,
                 is_retry,
@@ -1839,10 +1922,15 @@ where
             .await
             .err_tip(|| "In SimpleSchedulerStateManager::add_operation");
 
-        // Record metrics for new action entering the queue
+        // Record metrics for new action entering the queue. The action isn't in
+        // the database yet, so the identity comes from the client's request
+        // context, the same place `AwaitedAction::new` reads it from.
         if result.is_ok() {
-            self.scheduler_metrics
-                .record_stage_transition(None, ActionStage::Queued);
+            self.scheduler_metrics.record_stage_transition(
+                &identity_from_current_context(),
+                None,
+                &ActionStage::Queued,
+            );
             self.record_actions_count().await;
         }
 

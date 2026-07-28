@@ -17,15 +17,16 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::metrics::{
-    AGE_BUCKET_LABELS, AgeBuckets, CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS,
-    ExecutionMetricAttrs, ExecutionStage, WORKER_METRICS, WORKER_POOL_METRICS,
-    WorkerDisconnectReason, execution_output_bytes, make_execution_attributes, peak_memory_sample,
-    pool_available_sample, record_cache_entries_delta, record_completed_execution_metrics,
-    record_connection_acquired, record_connection_reconnect, record_executing_ages,
-    record_execution_cpu_time, record_execution_peak_memory, record_health_check,
-    record_matching_pass, record_queue_ages, record_rpc_served, record_store_tier_io,
-    record_store_tier_read, record_worker_connected, record_worker_disconnected,
-    record_worker_keepalive, record_worker_state, saturating_i64, split_grpc_path,
+    AGE_BUCKET_LABELS, AgeBuckets, CACHE_METRICS, CacheMetricAttrs, EXECUTION_IDENTITY_OTHER,
+    EXECUTION_IDENTITY_UNKNOWN, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage,
+    WORKER_METRICS, WORKER_POOL_METRICS, WorkerDisconnectReason, execution_output_bytes,
+    make_execution_attributes, peak_memory_sample, pool_available_sample,
+    record_cache_entries_delta, record_completed_execution_metrics, record_connection_acquired,
+    record_connection_reconnect, record_executing_ages, record_execution_cpu_time,
+    record_execution_peak_memory, record_health_check, record_matching_pass, record_queue_ages,
+    record_rpc_served, record_store_tier_io, record_store_tier_read, record_worker_connected,
+    record_worker_disconnected, record_worker_keepalive, record_worker_state, saturating_i64,
+    split_grpc_path,
 };
 use opentelemetry::KeyValue;
 
@@ -95,17 +96,38 @@ fn test_execution_metric_attrs() {
 
 #[test]
 fn test_make_execution_attributes() {
-    let attrs = make_execution_attributes("test_instance", Some(100));
+    // This binary installs no identity allowlist, so a client identity is
+    // bucketed. See identity_label_test.rs for the allowlisted case.
+    let attrs = make_execution_attributes("test_instance", "ci", Some(100));
 
-    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs.len(), 3);
     assert!(attrs.iter().any(
         |kv| kv.key.as_str() == "execution_instance" && kv.value.to_string() == "test_instance"
     ));
     assert!(
         attrs
             .iter()
+            .any(|kv| kv.key.as_str() == "execution_identity"
+                && kv.value.to_string() == EXECUTION_IDENTITY_OTHER)
+    );
+    assert!(
+        attrs
+            .iter()
             .any(|kv| kv.key.as_str() == "execution_priority"
                 && kv.value == opentelemetry::Value::I64(100))
+    );
+}
+
+#[test]
+fn test_make_execution_attributes_without_identity() {
+    let attrs = make_execution_attributes("test_instance", "", None);
+
+    assert_eq!(attrs.len(), 2);
+    assert!(
+        attrs
+            .iter()
+            .any(|kv| kv.key.as_str() == "execution_identity"
+                && kv.value.to_string() == EXECUTION_IDENTITY_UNKNOWN)
     );
 }
 
@@ -248,10 +270,10 @@ fn record_completed_execution_metrics_guards_unpopulated_metadata() {
         ..ActionResult::default()
     };
     // Should record without panicking.
-    record_completed_execution_metrics(&populated, "instance", Some(3));
+    record_completed_execution_metrics(&populated, "instance", "", Some(3));
 
     // Default (UNIX_EPOCH) metadata must skip the duration records cleanly.
-    record_completed_execution_metrics(&ActionResult::default(), "instance", None);
+    record_completed_execution_metrics(&ActionResult::default(), "instance", "", None);
 }
 
 #[test]
