@@ -1175,8 +1175,10 @@ pub struct GlobalConfig {
     /// in the kernel limit. It is a good idea to set a very large `ulimit -n`.
     /// Note: This value must be greater than 10.
     ///
+    /// Omitting this field, or setting it to 0, uses the default.
+    ///
     /// Default: 24576 (= 24 * 1024)
-    #[serde(deserialize_with = "convert_numeric_with_shellexpand")]
+    #[serde(default, deserialize_with = "convert_numeric_with_shellexpand")]
     pub max_open_files: usize,
 
     /// Default hash function to use while uploading blobs to the CAS when not set
