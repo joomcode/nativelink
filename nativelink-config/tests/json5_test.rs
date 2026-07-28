@@ -72,3 +72,29 @@ fn test_global_metrics_identity_allowlist_defaults_to_empty() {
             .is_empty()
     );
 }
+
+#[test]
+fn test_global_config_fields_are_all_optional() {
+    // A `global` block set for one reason (e.g. only an identity allowlist)
+    // must not force unrelated fields to be spelled out. `max_open_files: 0`
+    // means "use the default", which nativelink applies at startup.
+    let config: CasConfig = serde_json5::from_str(
+        r#"{
+          "stores": [],
+          "servers": [],
+          "global": {
+            "metrics_identity_allowlist": ["ci", "local"],
+          },
+        }"#,
+    )
+    .expect("A global block without max_open_files should parse");
+
+    let global = config.global.expect("global config present");
+    assert_eq!(global.max_open_files, 0, "0 signals the startup default");
+    assert_eq!(global.default_digest_size_health_check, 0);
+    assert!(global.default_digest_hash_function.is_none());
+    assert_eq!(
+        global.metrics_identity_allowlist,
+        vec!["ci".to_string(), "local".to_string()]
+    );
+}
