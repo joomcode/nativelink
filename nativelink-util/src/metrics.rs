@@ -15,8 +15,10 @@
 // limitations under the License.
 
 use core::fmt::{Display, Formatter};
+use std::collections::HashSet;
 use std::sync::{LazyLock, OnceLock};
 
+use nativelink_error::{Code, make_err};
 use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
 
 use crate::action_messages::ActionStage;
@@ -68,6 +70,64 @@ pub const EXECUTION_RESULT: &str = "execution_result";
 pub const EXECUTION_INSTANCE: &str = "execution_instance";
 pub const EXECUTION_PRIORITY: &str = "execution_priority";
 pub const EXECUTION_EXIT_CODE: &str = "execution_exit_code";
+pub const EXECUTION_IDENTITY: &str = "execution_identity";
+
+/// `EXECUTION_IDENTITY` value for requests that carry no `enduser.id` baggage.
+pub const EXECUTION_IDENTITY_UNKNOWN: &str = "unknown";
+
+/// `EXECUTION_IDENTITY` value for identities seen after the label set is full.
+pub const EXECUTION_IDENTITY_OTHER: &str = "other";
+
+/// The identities configured by [`set_identity_allowlist`].
+static IDENTITY_ALLOWLIST: OnceLock<HashSet<Box<str>>> = OnceLock::new();
+
+/// Configures which client identities are reported in the `EXECUTION_IDENTITY`
+/// metric label, e.g. `["ci", "local"]`.
+///
+/// The `enduser.id` baggage an identity comes from is client-controlled free
+/// text, so it is never used as a label value directly: anything not listed
+/// here is reported as [`EXECUTION_IDENTITY_OTHER`]. The label therefore has
+/// exactly `identities.len() + 2` possible values no matter what clients send.
+/// Empty entries are ignored, since an absent identity is already reported as
+/// [`EXECUTION_IDENTITY_UNKNOWN`].
+///
+/// Call this during startup, before any execution metric is recorded; leaving
+/// it unset means no identity is distinguished.
+///
+/// # Errors
+///
+/// Returns an error if the allowlist was already configured.
+pub fn set_identity_allowlist(
+    identities: impl IntoIterator<Item = String>,
+) -> Result<(), nativelink_error::Error> {
+    let identities: HashSet<Box<str>> = identities
+        .into_iter()
+        .filter(|identity| !identity.is_empty())
+        .map(String::into_boxed_str)
+        .collect();
+    IDENTITY_ALLOWLIST
+        .set(identities)
+        .map_err(|_| make_err!(Code::Internal, "set_identity_allowlist already set"))
+}
+
+/// Maps a client identity to its `EXECUTION_IDENTITY` metric label value.
+///
+/// An absent identity becomes [`EXECUTION_IDENTITY_UNKNOWN`] and one that isn't
+/// allowlisted becomes [`EXECUTION_IDENTITY_OTHER`], keeping the label's
+/// cardinality bounded by configuration rather than by client behavior. See
+/// [`set_identity_allowlist`].
+#[must_use]
+pub fn identity_label(identity: &str) -> &'static str {
+    if identity.is_empty() {
+        return EXECUTION_IDENTITY_UNKNOWN;
+    }
+    // The allowlist lives in a `OnceLock` for the rest of the process, so its
+    // entries can be handed out as `&'static str` attribute values.
+    IDENTITY_ALLOWLIST
+        .get()
+        .and_then(|allowed| allowed.get(identity))
+        .map_or(EXECUTION_IDENTITY_OTHER, |identity| &**identity)
+}
 
 /// Cache operation types for metrics classification.
 #[derive(Debug, Clone, Copy)]
@@ -310,6 +370,8 @@ impl CacheMetricAttrs {
 /// Pre-allocated attribute combinations for efficient remote execution metrics collection.
 #[derive(Debug)]
 pub struct ExecutionMetricAttrs {
+    // Attributes shared by every combination, without stage or result.
+    base: Vec<KeyValue>,
     // Stage transition attributes
     unknown: Vec<KeyValue>,
     cache_check: Vec<KeyValue>,
@@ -339,6 +401,7 @@ impl ExecutionMetricAttrs {
         };
 
         Self {
+            base: base_attrs.to_vec(),
             unknown: make_attrs(ExecutionStage::Unknown, None),
             cache_check: make_attrs(ExecutionStage::CacheCheck, None),
             queued: make_attrs(ExecutionStage::Queued, None),
@@ -367,6 +430,13 @@ impl ExecutionMetricAttrs {
     }
 
     // Attribute accessors
+    /// The attributes shared by every combination, without stage or result.
+    ///
+    /// Used by metrics that are not scoped to a stage, e.g. total duration.
+    #[must_use]
+    pub fn base(&self) -> &[KeyValue] {
+        &self.base
+    }
     #[must_use]
     pub fn unknown(&self) -> &[KeyValue] {
         &self.unknown
@@ -713,9 +783,19 @@ pub struct ExecutionMetrics {
 }
 
 /// Helper function to create attributes for execution metrics
+///
+/// `identity` is the requesting client's `enduser.id`; it is passed through
+/// [`identity_label`] to keep the label's value set bounded.
 #[must_use]
-pub fn make_execution_attributes(instance_name: &str, priority: Option<i32>) -> Vec<KeyValue> {
-    let mut attrs = vec![KeyValue::new(EXECUTION_INSTANCE, instance_name.to_string())];
+pub fn make_execution_attributes(
+    instance_name: &str,
+    identity: &str,
+    priority: Option<i32>,
+) -> Vec<KeyValue> {
+    let mut attrs = vec![
+        KeyValue::new(EXECUTION_INSTANCE, instance_name.to_string()),
+        KeyValue::new(EXECUTION_IDENTITY, identity_label(identity)),
+    ];
 
     if let Some(priority) = priority {
         attrs.push(KeyValue::new(EXECUTION_PRIORITY, i64::from(priority)));

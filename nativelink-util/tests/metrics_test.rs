@@ -14,8 +14,9 @@
 
 use nativelink_util::action_messages::{ActionResult, ActionStage};
 use nativelink_util::metrics::{
-    CACHE_METRICS, CacheMetricAttrs, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage,
-    WORKER_POOL_METRICS, make_execution_attributes,
+    CACHE_METRICS, CacheMetricAttrs, EXECUTION_IDENTITY_OTHER, EXECUTION_IDENTITY_UNKNOWN,
+    EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage, WORKER_POOL_METRICS,
+    make_execution_attributes,
 };
 use opentelemetry::KeyValue;
 
@@ -85,17 +86,38 @@ fn test_execution_metric_attrs() {
 
 #[test]
 fn test_make_execution_attributes() {
-    let attrs = make_execution_attributes("test_instance", Some(100));
+    // This binary installs no identity allowlist, so a client identity is
+    // bucketed. See identity_label_test.rs for the allowlisted case.
+    let attrs = make_execution_attributes("test_instance", "ci", Some(100));
 
-    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs.len(), 3);
     assert!(attrs.iter().any(
         |kv| kv.key.as_str() == "execution_instance" && kv.value.to_string() == "test_instance"
     ));
     assert!(
         attrs
             .iter()
+            .any(|kv| kv.key.as_str() == "execution_identity"
+                && kv.value.to_string() == EXECUTION_IDENTITY_OTHER)
+    );
+    assert!(
+        attrs
+            .iter()
             .any(|kv| kv.key.as_str() == "execution_priority"
                 && kv.value == opentelemetry::Value::I64(100))
+    );
+}
+
+#[test]
+fn test_make_execution_attributes_without_identity() {
+    let attrs = make_execution_attributes("test_instance", "", None);
+
+    assert_eq!(attrs.len(), 2);
+    assert!(
+        attrs
+            .iter()
+            .any(|kv| kv.key.as_str() == "execution_identity"
+                && kv.value.to_string() == EXECUTION_IDENTITY_UNKNOWN)
     );
 }
 

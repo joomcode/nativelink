@@ -976,7 +976,7 @@ pub enum WorkerConfig {
     Local(LocalWorkerConfig),
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "dev-schema", derive(JsonSchema))]
 pub struct GlobalConfig {
@@ -1007,6 +1007,23 @@ pub struct GlobalConfig {
     /// Default: 1024*1024 (1MiB)
     #[serde(default, deserialize_with = "convert_data_size_with_shellexpand")]
     pub default_digest_size_health_check: usize,
+
+    /// Client identities reported in the `execution_identity` attribute of the
+    /// execution metrics, e.g. `["ci", "local"]`. An identity is the
+    /// `enduser.id` OpenTelemetry baggage value the client sends, so a Bazel
+    /// client joins a group with `--remote_header=baggage=enduser.id=ci`.
+    ///
+    /// Because that value is client-controlled, only the identities listed here
+    /// are reported: any other identity is reported as "other", and a request
+    /// that sends no identity as "unknown". The attribute therefore has exactly
+    /// as many values as this list plus those two, no matter what clients send.
+    ///
+    /// Leaving this empty means execution metrics are not split by identity;
+    /// every identity is then reported as "other".
+    ///
+    /// Default: [] (no identities distinguished)
+    #[serde(default, deserialize_with = "convert_vec_string_with_shellexpand")]
+    pub metrics_identity_allowlist: Vec<String>,
 }
 
 pub type StoreConfig = NamedConfig<StoreSpec>;
