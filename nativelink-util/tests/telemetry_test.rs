@@ -14,7 +14,9 @@ use axum::{Router, middleware};
 use ginepro::{LoadBalancedChannel, LookupService, ServiceDefinition};
 use hyper::{Request, Response, StatusCode, Uri};
 use nativelink_macro::nativelink_test;
-use nativelink_util::telemetry::{ClientHeaders, NL_OTEL_ENDPOINT, maybe_load_balanced_channel};
+use nativelink_util::telemetry::{
+    ClientHeaders, NL_OTEL_ENDPOINT, inject_current_context, maybe_load_balanced_channel,
+};
 use opentelemetry::baggage::BaggageExt;
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::{Context, KeyValue, global};
@@ -462,5 +464,34 @@ async fn metrics_are_tracked_with_otel_endpoint() -> Result<(), Box<dyn core::er
         expected_sum_data_points(),
         "Metric export with {NL_OTEL_ENDPOINT} must deliver the expected OTLP payload"
     );
+    Ok(())
+}
+
+#[nativelink_test]
+async fn inject_current_context_carries_baggage() -> Result<(), Box<dyn core::error::Error>> {
+    // Production installs this propagator pair in `init_tracing`; without it
+    // the global propagator is a no-op and nothing is injected.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry::propagation::TextMapCompositePropagator::new(vec![
+            Box::new(opentelemetry_sdk::propagation::BaggagePropagator::new()),
+            Box::new(opentelemetry_sdk::propagation::TraceContextPropagator::new()),
+        ]),
+    );
+
+    let mut request = tonic::Request::new(());
+    let _cx_guard =
+        Context::map_current(|cx| cx.with_baggage([KeyValue::new("enduser.id", "ci")])).attach();
+    inject_current_context(&mut request);
+
+    let baggage = request
+        .metadata()
+        .get("baggage")
+        .expect("baggage header should be injected")
+        .to_str()?;
+    assert!(
+        baggage.contains("enduser.id=ci"),
+        "expected the identity in the baggage header, got {baggage:?}"
+    );
+
     Ok(())
 }

@@ -23,7 +23,7 @@ use ginepro::LoadBalancedChannel;
 use hyper::http::Response;
 use nativelink_error::{Code, ResultExt, make_err};
 use nativelink_proto::build::bazel::remote::execution::v2::RequestMetadata;
-use opentelemetry::propagation::TextMapCompositePropagator;
+use opentelemetry::propagation::{Injector, TextMapCompositePropagator};
 use opentelemetry::trace::{TraceContextExt, Tracer, TracerProvider};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -252,12 +252,38 @@ const BAZEL_REQUESTMETADATA_HEADER: &str = "build.bazel.remote.execution.v2.requ
 
 use opentelemetry::baggage::BaggageExt;
 use opentelemetry::context::FutureExt;
+use tonic::metadata::{MetadataKey, MetadataValue};
 use url::Url;
 
 /// ASCII headers from an inbound client request, stored in the task context
 /// so that outgoing upstream calls can forward them (e.g. JWT auth tokens).
 #[derive(Clone, Debug, Default)]
 pub struct ClientHeaders(pub Arc<HashMap<String, String>>);
+
+struct TonicMetadataInjector<'a>(&'a mut tonic::metadata::MetadataMap);
+
+impl Injector for TonicMetadataInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let (Ok(k), Ok(v)) = (
+            MetadataKey::from_bytes(key.as_bytes()),
+            MetadataValue::try_from(&value),
+        ) {
+            self.0.insert(k, v);
+        }
+    }
+}
+
+/// Injects the current `OpenTelemetry` context into an outgoing gRPC request.
+///
+/// The configured propagator carries both the trace context and the baggage,
+/// so this is what keeps a client's `enduser.id` (and the Bazel request
+/// metadata) attached across a hop to an upstream `NativeLink`. Without it the
+/// upstream sees an unparented request with no identity.
+pub fn inject_current_context<T>(request: &mut tonic::Request<T>) {
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject(&mut TonicMetadataInjector(request.metadata_mut()));
+    });
+}
 
 #[derive(Debug, Clone)]
 pub struct OtlpMiddleware<S> {
