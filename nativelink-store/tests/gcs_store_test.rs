@@ -1169,6 +1169,16 @@ async fn get_part_ignores_empty_stream_chunks() -> Result<(), Error> {
         async fn object_exists(&self, object_path: &ObjectPath) -> Result<bool, Error> {
             self.0.object_exists(object_path).await
         }
+
+        async fn update_object_custom_time(
+            &self,
+            object_path: &ObjectPath,
+            custom_time_unix_secs: i64,
+        ) -> Result<(), Error> {
+            self.0
+                .update_object_custom_time(object_path, custom_time_unix_secs)
+                .await
+        }
     }
 
     let mock_ops = Arc::new(MockGcsOperations::new());

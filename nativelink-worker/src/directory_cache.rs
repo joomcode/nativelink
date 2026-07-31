@@ -2189,6 +2189,7 @@ mod tests {
             max_entries: 10,
             max_size_bytes: 1024 * 1024,
             cache_root,
+            ..Default::default()
         };
         let cache = DirectoryCache::new(config, cas_store).await?;
 

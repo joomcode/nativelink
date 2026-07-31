@@ -792,15 +792,18 @@ pub fn make_execution_attributes(
 }
 
 /// Records the histogram metrics derivable from a completed action's result.
+///
+/// `identity` is the requesting client's `enduser.id`; see
+/// [`make_execution_attributes`].
 pub fn record_completed_execution_metrics(
     action_result: &ActionResult,
     instance_name: &str,
-    worker_id: Option<&str>,
+    identity: &str,
     priority: Option<i32>,
 ) {
     let m = &*EXECUTION_METRICS;
     let md = &action_result.execution_metadata;
-    let base = make_execution_attributes(instance_name, worker_id, priority);
+    let base = make_execution_attributes(instance_name, identity, priority);
 
     let record_secs =
         |hist: &metrics::Histogram<f64>, start: SystemTime, end: SystemTime, attrs: &[KeyValue]| {
