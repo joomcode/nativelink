@@ -1349,7 +1349,7 @@ where
                     nativelink_util::metrics::record_completed_execution_metrics(
                         action_result,
                         instance_name,
-                        worker_id.as_deref(),
+                        identity,
                         priority,
                     );
                 }
@@ -1364,7 +1364,7 @@ where
             if is_retry {
                 let retry_attrs = nativelink_util::metrics::make_execution_attributes(
                     instance_name,
-                    worker_id.as_deref(),
+                    identity,
                     priority,
                 );
                 EXECUTION_METRICS.execution_retry_count.add(1, &retry_attrs);
