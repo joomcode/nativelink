@@ -15,7 +15,6 @@
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
@@ -73,9 +72,19 @@ use crate::worker::{
     ActionInfoWithProps, Worker, WorkerState, WorkerTimestamp, WorkerUpdate,
     reduce_platform_properties,
 };
-use crate::worker_capability_index::WorkerCapabilityIndex;
+use crate::worker_capability_index::{WorkerCapabilityIndex, WorkerSlot, WorkerSlotSet};
 use crate::worker_registry::SharedWorkerRegistry;
 use crate::worker_scheduler::WorkerScheduler;
+
+/// How much work the worker pool can accept at a point in time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkerPoolCapacity {
+    /// Number of workers that can accept at least one more action.
+    pub available_workers: usize,
+    /// Total number of free inflight slots over all available workers.
+    /// `None` means that at least one available worker has no inflight limit.
+    pub free_slots: Option<u64>,
+}
 
 #[derive(Debug)]
 pub struct WorkerSchedulerMetrics {
@@ -396,51 +405,134 @@ impl ApiWorkerSchedulerImpl {
         worker_id
     }
 
+    /// Returns how much work the pool can accept right now.
+    fn inner_available_capacity(&self) -> WorkerPoolCapacity {
+        let mut available_workers = 0;
+        let mut free_slots: u64 = 0;
+        let mut unlimited = false;
+
+        for (_, worker) in self.workers.iter() {
+            if !worker.can_accept_work() {
+                continue;
+            }
+            available_workers += 1;
+            if worker.max_inflight_tasks == 0 {
+                unlimited = true;
+                continue;
+            }
+            let running = u64::try_from(worker.running_action_infos.len()).unwrap_or(u64::MAX);
+            free_slots =
+                free_slots.saturating_add(worker.max_inflight_tasks.saturating_sub(running));
+        }
+
+        WorkerPoolCapacity {
+            available_workers,
+            free_slots: if unlimited { None } else { Some(free_slots) },
+        }
+    }
+
     /// Batch finds workers for multiple actions in a single pass.
     /// This reduces lock contention by acquiring the lock once for all actions.
-    /// Returns a map of (`action_index`, `worker_id`) pairs for successful matches.
+    /// Returns the matched worker for each action, in the order of `actions`.
+    ///
+    /// The pass keeps a working copy of the capacity of each worker, so a worker
+    /// never receives more work than `max_inflight_tasks` allows and the
+    /// `Minimum` properties of the earlier matches limit the later matches.
     fn inner_batch_find_workers_for_actions(
         &self,
         actions: &[&PlatformProperties],
         full_worker_logging: bool,
-    ) -> HashMap<usize, WorkerId> {
-        let mut results = HashMap::with_capacity(actions.len());
-        let mut workers_platform_properties = HashMap::new();
+    ) -> Vec<Option<WorkerId>> {
+        /// A worker that can take at least one more action in this pass.
+        struct AvailableWorker<'a> {
+            slot: WorkerSlot,
+            id: &'a WorkerId,
+            /// Working copy of the worker properties. The `Minimum` values drop
+            /// as this pass assigns work to the worker.
+            properties: PlatformProperties,
+            /// Remaining inflight slots. `u64::MAX` means no limit.
+            free_slots: u64,
+        }
 
+        let mut results: Vec<Option<WorkerId>> = vec![None; actions.len()];
+        if actions.is_empty() {
+            return results;
+        }
+
+        // Snapshot the workers that can accept work. The order follows the
+        // allocation strategy, because the LRU cache holds the most recently
+        // used worker first.
+        let ordered: Vec<&Worker> = match self.allocation_strategy {
+            WorkerAllocationStrategy::LeastRecentlyUsed => self
+                .workers
+                .iter()
+                .rev()
+                .map(|(_, worker)| worker)
+                .collect(),
+            WorkerAllocationStrategy::MostRecentlyUsed => {
+                self.workers.iter().map(|(_, worker)| worker).collect()
+            }
+        };
+        let mut available: Vec<AvailableWorker<'_>> = ordered
+            .into_iter()
+            .filter(|worker| worker.can_accept_work())
+            .filter_map(|worker| {
+                let slot = self.capability_index.slot_of(&worker.id)?;
+                let free_slots = if worker.max_inflight_tasks == 0 {
+                    u64::MAX
+                } else {
+                    let running =
+                        u64::try_from(worker.running_action_infos.len()).unwrap_or(u64::MAX);
+                    worker.max_inflight_tasks.saturating_sub(running)
+                };
+                Some(AvailableWorker {
+                    slot,
+                    id: &worker.id,
+                    properties: worker.platform_properties.clone(),
+                    free_slots,
+                })
+            })
+            .collect();
+
+        if available.is_empty() {
+            if full_worker_logging {
+                info!("All workers are fully allocated");
+            }
+            return results;
+        }
+
+        let mut candidates = WorkerSlotSet::new();
         for (idx, platform_properties) in actions.iter().enumerate() {
-            let candidates = self
-                .capability_index
-                .find_matching_workers(platform_properties, full_worker_logging);
-            if candidates.is_empty() {
+            if available.is_empty() {
+                // Every worker is full, so the rest of the batch has to wait.
+                break;
+            }
+
+            if !self.capability_index.find_matching_slots(
+                platform_properties,
+                full_worker_logging,
+                &mut candidates,
+            ) {
                 continue;
             }
 
-            for worker_id in candidates {
-                if let Some(worker) = self.workers.peek(&worker_id) {
-                    if !worker.can_accept_work() {
-                        continue;
-                    }
-
-                    if !workers_platform_properties.contains_key(&worker_id) {
-                        workers_platform_properties
-                            .insert(worker_id.clone(), worker.platform_properties.clone());
-                    }
-
-                    if !platform_properties.is_satisfied_by(
-                        &workers_platform_properties[&worker_id],
-                        full_worker_logging,
-                    ) {
-                        continue;
-                    }
-
-                    reduce_platform_properties(
-                        workers_platform_properties.get_mut(&worker_id).unwrap(),
-                        platform_properties,
-                    );
-
-                    results.insert(idx, worker_id.clone());
-                    break;
+            let Some(position) = available.iter().position(|worker| {
+                candidates.contains(worker.slot)
+                    && platform_properties.is_satisfied_by(&worker.properties, full_worker_logging)
+            }) else {
+                if full_worker_logging {
+                    info!("No workers matched!");
                 }
+                continue;
+            };
+
+            let worker = &mut available[position];
+            reduce_platform_properties(&mut worker.properties, platform_properties);
+            results[idx] = Some(worker.id.clone());
+            worker.free_slots = worker.free_slots.saturating_sub(1);
+            if worker.free_slots == 0 {
+                // Keep the remaining workers in allocation-strategy order.
+                available.remove(position);
             }
         }
 
@@ -890,17 +982,26 @@ impl ApiWorkerScheduler {
         result
     }
 
+    /// Returns how much work the pool can accept right now.
+    ///
+    /// The matching engine uses this to skip a cycle when every worker is full,
+    /// and to limit how much of the queue one cycle reads.
+    pub async fn available_capacity(&self) -> WorkerPoolCapacity {
+        let inner = self.inner.read().await;
+        inner.inner_available_capacity()
+    }
+
     /// Batch finds workers for multiple actions in a single lock acquisition.
     /// This reduces lock contention compared to calling `find_worker_for_action`
     /// for each action individually.
     ///
-    /// Returns a vector of (`action_index`, `worker_id`) pairs for successful matches.
-    /// Actions that couldn't be matched to a worker are not included in the result.
+    /// Returns the matched worker for each action, in the order of `actions`.
+    /// An action that no worker can take holds `None`.
     pub async fn batch_find_workers_for_actions(
         &self,
         actions: &[&PlatformProperties],
         full_worker_logging: bool,
-    ) -> HashMap<usize, WorkerId> {
+    ) -> Vec<Option<WorkerId>> {
         let start = Instant::now();
         self.metrics
             .find_worker_calls
@@ -915,7 +1016,7 @@ impl ApiWorkerScheduler {
             .workers_iterated
             .fetch_add(worker_count * actions.len() as u64, Ordering::Relaxed);
 
-        let hits = results.len() as u64;
+        let hits = results.iter().filter(|result| result.is_some()).count() as u64;
         let misses = actions.len() as u64 - hits;
         self.metrics
             .find_worker_hits

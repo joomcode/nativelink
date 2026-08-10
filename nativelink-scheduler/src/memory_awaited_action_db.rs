@@ -47,6 +47,9 @@ use crate::awaited_action_db::{
 /// Number of events to process per cycle.
 const MAX_ACTION_EVENTS_RX_PER_CYCLE: usize = 1024;
 
+/// Number of actions to write while the write lock is held once.
+const UPDATE_CHUNK_SIZE: usize = 128;
+
 /// Represents a client that is currently listening to an action.
 /// When the client is dropped, it will send the `AwaitedAction` to the
 /// `event_tx` if there are other cleanups needed.
@@ -1110,6 +1113,28 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Sync + 'static> Awaite
             .update_awaited_action(new_awaited_action)?;
         self.tasks_change_notify.notify_one();
         Ok(())
+    }
+
+    async fn update_awaited_actions(
+        &self,
+        new_awaited_actions: Vec<AwaitedAction>,
+    ) -> Vec<Result<(), Error>> {
+        let mut results = Vec::with_capacity(new_awaited_actions.len());
+        // Write in chunks so that other users of the lock do not wait for the
+        // whole batch.
+        let mut remaining = new_awaited_actions.into_iter().peekable();
+        while remaining.peek().is_some() {
+            let mut inner = self.inner.write().await;
+            for new_awaited_action in remaining.by_ref().take(UPDATE_CHUNK_SIZE) {
+                results.push(inner.update_awaited_action(new_awaited_action));
+            }
+        }
+        if !results.is_empty() {
+            // One notification is enough, because the matching engine reads the
+            // whole queue on every cycle.
+            self.tasks_change_notify.notify_one();
+        }
+        results
     }
 
     async fn add_action(

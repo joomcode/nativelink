@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::fmt::Write as _;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -68,6 +69,70 @@ const DEFAULT_CLIENT_ACTION_TIMEOUT_S: u64 = 60;
 /// Default times a job can retry before failing.
 /// If this changes, remember to change the documentation in the config.
 const DEFAULT_MAX_JOB_RETRIES: usize = 3;
+
+/// How many queued actions one batch cycle reads for each free worker slot.
+/// A worker can reject an action because of its `Minimum` properties, so the
+/// cycle reads more actions than the number of slots that it can fill.
+const QUEUE_SCAN_SLACK_FACTOR: u64 = 4;
+
+/// How many queued actions one batch cycle reads on top of the slack factor.
+const QUEUE_SCAN_SLACK_BASE: u64 = 32;
+
+/// An action of the queue that is ready for matching.
+#[derive(Debug)]
+struct PreparedAction {
+    operation_id: OperationId,
+    action_info: Arc<ActionInfo>,
+    origin_metadata: OriginMetadata,
+    platform_properties: Arc<PlatformProperties>,
+}
+
+/// Converts the platform properties of an action into their typed form and
+/// keeps the result for the rest of the matching cycle.
+///
+/// Actions of the same build share their platform properties, so the conversion
+/// runs once for each distinct property map instead of once for each action.
+#[derive(Debug, Default)]
+struct PlatformPropertiesCache {
+    entries: HashMap<Box<str>, Arc<PlatformProperties>>,
+    key_buffer: String,
+}
+
+impl PlatformPropertiesCache {
+    fn get_or_insert(
+        &mut self,
+        platform_property_manager: &PlatformPropertyManager,
+        raw_properties: &HashMap<String, String>,
+    ) -> Result<Arc<PlatformProperties>, Error> {
+        self.key_buffer.clear();
+        Self::write_key(&mut self.key_buffer, raw_properties);
+        if let Some(platform_properties) = self.entries.get(self.key_buffer.as_str()) {
+            return Ok(platform_properties.clone());
+        }
+        let platform_properties =
+            Arc::new(platform_property_manager.make_platform_properties(raw_properties.clone())?);
+        self.entries.insert(
+            Box::from(self.key_buffer.as_str()),
+            platform_properties.clone(),
+        );
+        Ok(platform_properties)
+    }
+
+    /// Writes a key that identifies the raw property map.
+    ///
+    /// Each name and each value carries its length, so two different maps never
+    /// produce the same key.
+    fn write_key(out: &mut String, raw_properties: &HashMap<String, String>) {
+        let mut entries: Vec<(&str, &str)> = raw_properties
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        entries.sort_unstable();
+        for (name, value) in entries {
+            let _ = write!(out, "{}:{name}{}:{value}", name.len(), value.len());
+        }
+    }
+}
 
 #[derive(Serialize)]
 pub struct SchedulerState {
@@ -289,6 +354,10 @@ impl SimpleScheduler {
         self.do_try_match(true).await
     }
 
+    pub async fn do_try_match_batch_for_test(&self) -> Result<(), Error> {
+        self.do_try_match_batch(true).await
+    }
+
     // TODO(palfrey) This is an O(n*m) (aka n^2) algorithm. In theory we
     // can create a map of capabilities of each worker and then try and match
     // the actions to the worker using the map lookup (ie. map reduce).
@@ -453,20 +522,27 @@ impl SimpleScheduler {
         result
     }
 
-    /// Batch version of `do_try_match` that collects all queued actions and matches
+    /// Batch version of `do_try_match` that reads the queued actions and matches
     /// them to workers in a single batch operation. This reduces lock contention
     /// compared to the sequential version.
+    ///
+    /// The cycle reads the queue in rounds, and each round reads only as many
+    /// actions as the free capacity of the worker pool can take. The cycle stops
+    /// when the pool is full or when the queue ends, so a deep queue does not
+    /// cost anything once every worker is busy.
     async fn do_try_match_batch(&self, full_worker_logging: bool) -> Result<(), Error> {
-        // Prepare actions with their platform properties for batch matching
-        struct PreparedAction {
-            action_state_result: Box<dyn ActionStateResult>,
-            action_info: ActionInfoWithProps,
-        }
-
         let start = Instant::now();
 
-        // Collect all queued actions
-        let stream = self
+        // Nothing can run when every worker is full, so do not read the queue.
+        let capacity = self.worker_scheduler.available_capacity().await;
+        if capacity.available_workers == 0 {
+            if full_worker_logging {
+                info!("All workers are fully allocated");
+            }
+            return Ok(());
+        }
+
+        let mut stream = self
             .get_queued_operations()
             .await
             .err_tip(|| "Failed to get queued operations in do_try_match_batch")?;
@@ -479,21 +555,86 @@ impl SimpleScheduler {
             );
         }
 
-        // Collect all action state results and compute their platform properties
-        let action_state_results: Vec<_> = stream.collect().await;
+        // Many queued actions share the same raw properties, so the cache
+        // converts each distinct property map only once for the whole cycle.
+        let mut properties_cache = PlatformPropertiesCache::default();
+        let mut result = Ok(());
+        let mut remaining_slots = capacity.free_slots;
+        let mut actions_count = 0;
+        let mut matches_count = 0;
+        let mut rounds = 0;
 
-        if action_state_results.is_empty() {
-            return Ok(());
+        loop {
+            // Read at most this many actions in this round. The slack covers the
+            // actions that a worker rejects because of its `Minimum` properties.
+            let scan_limit = match remaining_slots {
+                Some(0) => break,
+                None => usize::MAX,
+                Some(free_slots) => usize::try_from(
+                    free_slots
+                        .saturating_mul(QUEUE_SCAN_SLACK_FACTOR)
+                        .saturating_add(QUEUE_SCAN_SLACK_BASE),
+                )
+                .unwrap_or(usize::MAX),
+            };
+
+            let (prepared_actions, queue_ended) = self
+                .prepare_queued_actions(&mut stream, scan_limit, &mut properties_cache)
+                .await;
+            actions_count += prepared_actions.len();
+            rounds += 1;
+
+            if !prepared_actions.is_empty() {
+                let (round_matches, round_result) = self
+                    .match_and_dispatch_actions(&prepared_actions, full_worker_logging)
+                    .await;
+                matches_count += round_matches;
+                result = result.merge(round_result);
+                if let Some(free_slots) = remaining_slots.as_mut() {
+                    *free_slots = free_slots.saturating_sub(round_matches as u64);
+                }
+            }
+
+            if queue_ended {
+                break;
+            }
+        }
+        drop(stream);
+
+        let total_elapsed = start.elapsed();
+        EXECUTION_METRICS
+            .do_try_match_duration
+            .record(total_elapsed.as_secs_f64(), &[]);
+        if total_elapsed > Duration::from_secs(5) {
+            warn!(
+                total_ms = total_elapsed.as_millis(),
+                query_ms = query_elapsed.as_millis(),
+                actions_processed = actions_count,
+                matches_found = matches_count,
+                rounds,
+                "Slow do_try_match_batch cycle"
+            );
         }
 
-        let mut prepared_actions: Vec<PreparedAction> =
-            Vec::with_capacity(action_state_results.len());
-        let mut platform_properties_refs: Vec<&PlatformProperties> =
-            Vec::with_capacity(action_state_results.len());
+        result
+    }
 
-        for action_state_result in action_state_results {
-            let (action_info, maybe_origin_metadata) =
-                match action_state_result.as_action_info().await {
+    /// Reads up to `scan_limit` actions from the queue and computes their
+    /// platform properties. The second value is `true` when the queue ended.
+    async fn prepare_queued_actions(
+        &self,
+        stream: &mut ActionStateResultStream<'_>,
+        scan_limit: usize,
+        properties_cache: &mut PlatformPropertiesCache,
+    ) -> (Vec<PreparedAction>, bool) {
+        let mut prepared_actions = Vec::new();
+        while prepared_actions.len() < scan_limit {
+            let Some(action_state_result) = stream.next().await else {
+                return (prepared_actions, true);
+            };
+
+            let (action_info, operation_id, maybe_origin_metadata) =
+                match action_state_result.as_action_info_and_operation_id().await {
                     Ok(result) => result,
                     Err(err) => {
                         warn!(?err, "Failed to get action_info in batch mode, skipping");
@@ -501,13 +642,11 @@ impl SimpleScheduler {
                     }
                 };
 
-            // TODO(palfrey) We should not compute this every time and instead store
-            // it with the ActionInfo when we receive it.
-            let platform_properties = match self
-                .platform_property_manager
-                .make_platform_properties(action_info.platform_properties.clone())
-            {
-                Ok(props) => props,
+            let platform_properties = match properties_cache.get_or_insert(
+                &self.platform_property_manager,
+                &action_info.platform_properties,
+            ) {
+                Ok(platform_properties) => platform_properties,
                 Err(err) => {
                     warn!(
                         ?err,
@@ -517,69 +656,74 @@ impl SimpleScheduler {
                 }
             };
 
-            let action_info_with_props = ActionInfoWithProps {
-                inner: action_info,
-                platform_properties,
-                scheduler_start_execute_event_id: None,
-                origin_metadata: maybe_origin_metadata.clone().unwrap_or_default(),
-            };
-
             prepared_actions.push(PreparedAction {
-                action_state_result,
-                action_info: action_info_with_props,
+                operation_id,
+                action_info,
+                origin_metadata: maybe_origin_metadata.unwrap_or_default(),
+                platform_properties,
             });
         }
+        (prepared_actions, false)
+    }
 
-        // Collect platform properties references for batch matching
-        for prepared in &prepared_actions {
-            platform_properties_refs.push(&prepared.action_info.platform_properties);
-        }
-
+    /// Matches the given actions to workers, assigns them, and notifies the
+    /// workers. Returns how many actions reached a worker.
+    async fn match_and_dispatch_actions(
+        &self,
+        prepared_actions: &[PreparedAction],
+        full_worker_logging: bool,
+    ) -> (usize, Result<(), Error>) {
         // Batch find workers for all actions (single lock acquisition)
+        let platform_properties_refs: Vec<&PlatformProperties> = prepared_actions
+            .iter()
+            .map(|prepared| prepared.platform_properties.as_ref())
+            .collect();
         let matches = self
             .worker_scheduler
             .batch_find_workers_for_actions(&platform_properties_refs, full_worker_logging)
             .await;
+        drop(platform_properties_refs);
 
-        let matches_count = matches.len();
-        let actions_count = prepared_actions.len();
-
-        if matches.is_empty() {
-            return Ok(());
+        // Phase 1: Assign the matched operations to their worker in one pass.
+        let mut matched_indexes: Vec<usize> = Vec::new();
+        let mut assignments: Vec<(OperationId, WorkerId)> = Vec::new();
+        for (action_idx, maybe_worker_id) in matches.into_iter().enumerate() {
+            let Some(worker_id) = maybe_worker_id else {
+                continue;
+            };
+            matched_indexes.push(action_idx);
+            assignments.push((prepared_actions[action_idx].operation_id.clone(), worker_id));
         }
 
-        // Phase 1: Extract operation_ids and assign operations to workers
-        // Collect successful assignments for batch worker notification
-        let mut successful_assignments: Vec<(WorkerId, OperationId, ActionInfoWithProps)> =
-            Vec::with_capacity(matches_count);
+        if assignments.is_empty() {
+            return (0, Ok(()));
+        }
+
+        let assign_results = self
+            .matching_engine_state_manager
+            .assign_operations(assignments.clone())
+            .await;
+
         let mut result = Ok(());
-
-        for (action_idx, worker_id) in matches {
-            let prepared = &prepared_actions[action_idx];
-
-            // Extract the operation_id from the action_state
-            let operation_id = match prepared.action_state_result.as_state().await {
-                Ok((action_state, _origin_metadata)) => action_state.client_operation_id.clone(),
-                Err(err) => {
-                    warn!(?err, "Failed to get action_state in batch mode, skipping");
-                    continue;
-                }
-            };
-
-            // Tell the matching engine that the operation is being assigned to a worker
-            let assign_result = self
-                .matching_engine_state_manager
-                .assign_operation(&operation_id, Ok(&worker_id))
-                .await
-                .err_tip(|| "Failed to assign operation in do_try_match_batch");
-
-            match assign_result {
+        let mut successful_assignments: Vec<(WorkerId, OperationId, ActionInfoWithProps)> =
+            Vec::with_capacity(assignments.len());
+        for ((action_idx, (operation_id, worker_id)), assign_result) in matched_indexes
+            .into_iter()
+            .zip(assignments)
+            .zip(assign_results)
+        {
+            match assign_result.err_tip(|| "Failed to assign operation in do_try_match_batch") {
                 Ok(()) => {
-                    // Assignment successful, queue for batch worker notification
+                    let prepared = &prepared_actions[action_idx];
                     successful_assignments.push((
                         worker_id,
                         operation_id,
-                        prepared.action_info.clone(),
+                        ActionInfoWithProps {
+                            inner: prepared.action_info.clone(),
+                            platform_properties: prepared.platform_properties.as_ref().clone(),
+                            origin_metadata: prepared.origin_metadata.clone(),
+                            scheduler_start_execute_event_id: None,
+                        },
                     ));
                 }
                 Err(err) => {
@@ -593,6 +737,7 @@ impl SimpleScheduler {
         }
 
         // Phase 2: Batch notify workers (single lock acquisition)
+        let dispatched = successful_assignments.len();
         if !successful_assignments.is_empty() {
             let notify_results = self
                 .worker_scheduler
@@ -607,21 +752,7 @@ impl SimpleScheduler {
             }
         }
 
-        let total_elapsed = start.elapsed();
-        EXECUTION_METRICS
-            .do_try_match_duration
-            .record(total_elapsed.as_secs_f64(), &[]);
-        if total_elapsed > Duration::from_secs(5) {
-            warn!(
-                total_ms = total_elapsed.as_millis(),
-                query_ms = query_elapsed.as_millis(),
-                actions_processed = actions_count,
-                matches_found = matches_count,
-                "Slow do_try_match_batch cycle"
-            );
-        }
-
-        result
+        (dispatched, result)
     }
 
     /// Internal method that dispatches to either batch or sequential matching.

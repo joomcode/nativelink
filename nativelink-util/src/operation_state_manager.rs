@@ -54,6 +54,23 @@ pub trait ActionStateResult: Send + Sync + 'static {
     async fn changed(&mut self) -> Result<(Arc<ActionState>, Option<OriginMetadata>), Error>;
     /// Provide result as action info. This behavior will not be supported by all implementations.
     async fn as_action_info(&self) -> Result<(Arc<ActionInfo>, Option<OriginMetadata>), Error>;
+
+    /// Provides the action info and the operation id together.
+    ///
+    /// The matching engine needs both values for every queued action. An
+    /// implementation that reads from a store can override this method to read
+    /// the action only once.
+    async fn as_action_info_and_operation_id(
+        &self,
+    ) -> Result<(Arc<ActionInfo>, OperationId, Option<OriginMetadata>), Error> {
+        let (action_state, _origin_metadata) = self.as_state().await?;
+        let (action_info, maybe_origin_metadata) = self.as_action_info().await?;
+        Ok((
+            action_info,
+            action_state.client_operation_id.clone(),
+            maybe_origin_metadata,
+        ))
+    }
 }
 
 /// The direction in which the results are ordered.
@@ -174,4 +191,20 @@ pub trait MatchingEngineStateManager: Sync + Send + MetricsComponent {
         operation_id: &OperationId,
         worker_id_or_reason_for_unassign: Result<&WorkerId, Error>,
     ) -> Result<(), Error>;
+
+    /// Assign many operations to workers.
+    ///
+    /// The results follow the order of `assignments`. The default
+    /// implementation assigns one operation at a time. An implementation that
+    /// can write many operations in one pass must override this method.
+    async fn assign_operations(
+        &self,
+        assignments: Vec<(OperationId, WorkerId)>,
+    ) -> Vec<Result<(), Error>> {
+        let mut results = Vec::with_capacity(assignments.len());
+        for (operation_id, worker_id) in assignments {
+            results.push(self.assign_operation(&operation_id, Ok(&worker_id)).await);
+        }
+        results
+    }
 }

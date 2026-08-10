@@ -208,6 +208,24 @@ pub trait AwaitedActionDb: Send + Sync + MetricsComponent + Unpin + 'static {
         new_awaited_action: AwaitedAction,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
+    /// Process many changed `AwaitedAction`s and notify any listeners.
+    ///
+    /// The results follow the order of `new_awaited_actions`. The default
+    /// implementation writes one action at a time. An implementation that holds
+    /// a lock for each write must override this method to write in fewer passes.
+    fn update_awaited_actions(
+        &self,
+        new_awaited_actions: Vec<AwaitedAction>,
+    ) -> impl Future<Output = Vec<Result<(), Error>>> + Send {
+        async move {
+            let mut results = Vec::with_capacity(new_awaited_actions.len());
+            for new_awaited_action in new_awaited_actions {
+                results.push(self.update_awaited_action(new_awaited_action).await);
+            }
+            results
+        }
+    }
+
     /// Add (or join) an action to the `AwaitedActionDb` and subscribe
     /// to changes.
     fn add_action(

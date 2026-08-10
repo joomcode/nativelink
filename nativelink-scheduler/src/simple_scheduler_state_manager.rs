@@ -449,6 +449,21 @@ where
             awaited_action.maybe_origin_metadata().cloned(),
         ))
     }
+
+    /// Reads the action once and returns everything the matching engine needs.
+    async fn as_action_info_and_operation_id(
+        &self,
+    ) -> Result<(Arc<ActionInfo>, OperationId, Option<OriginMetadata>), Error> {
+        let awaited_action =
+            self.awaited_action_sub.borrow().await.err_tip(
+                || "In MatchingEngineActionStateResult::as_action_info_and_operation_id",
+            )?;
+        Ok((
+            awaited_action.action_info().clone(),
+            awaited_action.state().client_operation_id.clone(),
+            awaited_action.maybe_origin_metadata().cloned(),
+        ))
+    }
 }
 
 /// `SimpleSchedulerStateManager` is responsible for maintaining the state of the scheduler.
@@ -640,6 +655,77 @@ where
     #[must_use]
     pub const fn metrics(&self) -> &SchedulerMetrics {
         &self.scheduler_metrics
+    }
+
+    /// Records the metrics of an operation update that the database accepted.
+    async fn record_update_success_metrics(
+        &self,
+        awaited_action: &AwaitedAction,
+        previous_stage: &ActionStage,
+        new_stage: &ActionStage,
+        is_retry: bool,
+        action_insert_timestamp: std::time::SystemTime,
+    ) {
+        let action_state = awaited_action.state();
+        let instance_name = awaited_action
+            .action_info()
+            .unique_qualifier
+            .instance_name()
+            .as_str();
+        let priority = Some(awaited_action.action_info().priority);
+        let identity = identity_of(awaited_action);
+
+        // Build base attributes for metrics
+        let mut attrs =
+            nativelink_util::metrics::make_execution_attributes(instance_name, identity, priority);
+
+        // Add stage attribute
+        let execution_stage: ExecutionStage = (&action_state.stage).into();
+        attrs.push(KeyValue::new(EXECUTION_STAGE, execution_stage));
+
+        // Record stage transition
+        EXECUTION_METRICS.execution_stage_transitions.add(1, &attrs);
+
+        // For completed actions, record the completion count with result
+        match &action_state.stage {
+            ActionStage::Completed(action_result) => {
+                let result = if action_result.exit_code == 0 {
+                    ExecutionResult::Success
+                } else {
+                    ExecutionResult::Failure
+                };
+                attrs.push(KeyValue::new(EXECUTION_RESULT, result));
+                EXECUTION_METRICS.execution_completed_count.add(1, &attrs);
+                nativelink_util::metrics::record_completed_execution_metrics(
+                    action_result,
+                    instance_name,
+                    identity,
+                    priority,
+                );
+            }
+            ActionStage::CompletedFromCache(_) => {
+                attrs.push(KeyValue::new(EXECUTION_RESULT, ExecutionResult::CacheHit));
+                EXECUTION_METRICS.execution_completed_count.add(1, &attrs);
+            }
+            _ => {}
+        }
+
+        // A failed attempt that re-queued the action counts as a retry.
+        if is_retry {
+            let retry_attrs =
+                nativelink_util::metrics::make_execution_attributes(instance_name, identity, priority);
+            EXECUTION_METRICS.execution_retry_count.add(1, &retry_attrs);
+        }
+
+        // Record metrics for the stage transition
+        self.record_action_update_metrics(
+            identity,
+            previous_stage,
+            new_stage,
+            is_retry,
+            action_insert_timestamp,
+        )
+        .await;
     }
 
     /// Records metrics for an action state update.
@@ -1312,64 +1398,6 @@ where
                 return Err(err);
             }
 
-            // Record execution metrics after successful state update
-            let action_state = awaited_action.state();
-            let instance_name = awaited_action
-                .action_info()
-                .unique_qualifier
-                .instance_name()
-                .as_str();
-            let priority = Some(awaited_action.action_info().priority);
-            let identity = identity_of(&awaited_action);
-
-            // Build base attributes for metrics
-            let mut attrs = nativelink_util::metrics::make_execution_attributes(
-                instance_name,
-                identity,
-                priority,
-            );
-
-            // Add stage attribute
-            let execution_stage: ExecutionStage = (&action_state.stage).into();
-            attrs.push(KeyValue::new(EXECUTION_STAGE, execution_stage));
-
-            // Record stage transition
-            EXECUTION_METRICS.execution_stage_transitions.add(1, &attrs);
-
-            // For completed actions, record the completion count with result
-            match &action_state.stage {
-                ActionStage::Completed(action_result) => {
-                    let result = if action_result.exit_code == 0 {
-                        ExecutionResult::Success
-                    } else {
-                        ExecutionResult::Failure
-                    };
-                    attrs.push(KeyValue::new(EXECUTION_RESULT, result));
-                    EXECUTION_METRICS.execution_completed_count.add(1, &attrs);
-                    nativelink_util::metrics::record_completed_execution_metrics(
-                        action_result,
-                        instance_name,
-                        identity,
-                        priority,
-                    );
-                }
-                ActionStage::CompletedFromCache(_) => {
-                    attrs.push(KeyValue::new(EXECUTION_RESULT, ExecutionResult::CacheHit));
-                    EXECUTION_METRICS.execution_completed_count.add(1, &attrs);
-                }
-                _ => {}
-            }
-
-            // A failed attempt that re-queued the action counts as a retry.
-            if is_retry {
-                let retry_attrs = nativelink_util::metrics::make_execution_attributes(
-                    instance_name,
-                    identity,
-                    priority,
-                );
-                EXECUTION_METRICS.execution_retry_count.add(1, &retry_attrs);
-            }
-
             debug!(
                 %operation_id,
                 retry_count,
@@ -1377,9 +1405,8 @@ where
                 "inner_update_operation SUCCESS"
             );
 
-            // Record metrics for the stage transition
-            self.record_action_update_metrics(
-                identity,
+            self.record_update_success_metrics(
+                &awaited_action,
                 &previous_stage,
                 &stage,
                 is_retry,
@@ -1402,6 +1429,86 @@ where
                 "Failed to update action after {} retries with no error set",
                 MAX_UPDATE_RETRIES,
             )
+        }))
+    }
+
+    /// Loads an operation and applies the change that assigns it to a worker.
+    ///
+    /// The caller writes the returned action to the database. `Ok(None)` means
+    /// that the action no longer exists, which is not an error.
+    async fn prepare_assign_operation(
+        &self,
+        operation_id: &OperationId,
+        worker_id: &WorkerId,
+    ) -> Result<Option<PendingAssignment>, Error> {
+        let maybe_awaited_action_subscriber = self
+            .action_db
+            .get_by_operation_id(operation_id)
+            .await
+            .err_tip(|| "In SimpleSchedulerStateManager::assign_operations")?;
+        let Some(awaited_action_subscriber) = maybe_awaited_action_subscriber else {
+            // No action found. It is ok if the action was not found. It
+            // probably means that the action was dropped.
+            warn!(
+                %operation_id,
+                "Unable to update action due to it being missing, probably dropped"
+            );
+            return Ok(None);
+        };
+
+        let mut awaited_action = awaited_action_subscriber
+            .borrow()
+            .await
+            .err_tip(|| "In SimpleSchedulerStateManager::assign_operations")?;
+
+        // Make sure the worker id matches the awaited action worker id.
+        if awaited_action.worker_id().is_some() && Some(worker_id) != awaited_action.worker_id() {
+            // Another worker probably picked up the action.
+            return Err(make_err!(
+                Code::Aborted,
+                "Worker ids do not match - {:?} != {:?} for {:?}",
+                worker_id,
+                awaited_action.worker_id(),
+                awaited_action,
+            ));
+        }
+
+        // Make sure we don't update an action that is already completed.
+        if awaited_action.state().stage.is_finished() {
+            return Err(make_err!(
+                Code::Internal,
+                "Action {operation_id} is already completed with state {:?} - maybe_worker_id: {:?}",
+                awaited_action.state().stage,
+                worker_id,
+            ));
+        }
+
+        if awaited_action.state().stage == ActionStage::Executing {
+            warn!(state = ?awaited_action.state(), "Action already assigned");
+            return Err(make_err!(Code::Aborted, "Action already assigned"));
+        }
+
+        let previous_stage = awaited_action.state().stage.clone();
+        let action_insert_timestamp = awaited_action.action_info().insert_timestamp;
+        let now = (self.now_fn)().now();
+        awaited_action.set_worker_id(Some(worker_id.clone()), now);
+        awaited_action.worker_set_state(
+            Arc::new(ActionState {
+                stage: ActionStage::Executing,
+                // Client id is not known here, it is the responsibility of
+                // the the subscriber impl to replace this with the
+                // correct client id.
+                client_operation_id: operation_id.clone(),
+                action_digest: awaited_action.action_info().digest(),
+                last_transition_timestamp: now,
+            }),
+            now,
+        );
+
+        Ok(Some(PendingAssignment {
+            awaited_action,
+            previous_stage,
+            action_insert_timestamp,
         }))
     }
 
@@ -1721,4 +1828,72 @@ where
         self.inner_update_operation(operation_id, maybe_worker_id, update)
             .await
     }
+
+    async fn assign_operations(
+        &self,
+        assignments: Vec<(OperationId, WorkerId)>,
+    ) -> Vec<Result<(), Error>> {
+        let mut results: Vec<Option<Result<(), Error>>> =
+            (0..assignments.len()).map(|_| None).collect();
+
+        // Read and change every action first, then write them all in one pass.
+        let mut pending: Vec<(usize, PendingAssignment)> = Vec::with_capacity(assignments.len());
+        for (index, (operation_id, worker_id)) in assignments.iter().enumerate() {
+            match self.prepare_assign_operation(operation_id, worker_id).await {
+                Ok(Some(prepared)) => pending.push((index, prepared)),
+                Ok(None) => results[index] = Some(Ok(())),
+                Err(err) => results[index] = Some(Err(err)),
+            }
+        }
+
+        let write_results = self
+            .action_db
+            .update_awaited_actions(
+                pending
+                    .iter()
+                    .map(|(_, prepared)| prepared.awaited_action.clone())
+                    .collect(),
+            )
+            .await;
+
+        for ((index, prepared), write_result) in pending.into_iter().zip(write_results) {
+            match write_result {
+                Ok(()) => {
+                    self.record_update_success_metrics(
+                        &prepared.awaited_action,
+                        &prepared.previous_stage,
+                        &ActionStage::Executing,
+                        false,
+                        prepared.action_insert_timestamp,
+                    )
+                    .await;
+                    results[index] = Some(Ok(()));
+                }
+                Err(err) if err.code == Code::Aborted => {
+                    // Another update landed first. Assign this operation on its
+                    // own, so that the retry logic of `inner_update_operation`
+                    // applies to it.
+                    debug!(
+                        operation_id = %assignments[index].0,
+                        "Version conflict in batch assign, retrying alone"
+                    );
+                    let (operation_id, worker_id) = &assignments[index];
+                    results[index] = Some(self.assign_operation(operation_id, Ok(worker_id)).await);
+                }
+                Err(err) => results[index] = Some(Err(err)),
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|result| result.unwrap_or(Ok(())))
+            .collect()
+    }
+}
+
+/// An operation that is ready to be written as assigned to a worker.
+struct PendingAssignment {
+    awaited_action: AwaitedAction,
+    previous_stage: ActionStage,
+    action_insert_timestamp: std::time::SystemTime,
 }
