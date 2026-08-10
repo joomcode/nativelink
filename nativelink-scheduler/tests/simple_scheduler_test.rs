@@ -2801,3 +2801,211 @@ async fn logs_when_no_workers_match() -> Result<(), Error> {
 
     Ok(())
 }
+
+/// Adds a worker that accepts at most `max_inflight_tasks` actions at a time.
+async fn setup_new_worker_with_task_limit(
+    scheduler: &SimpleScheduler,
+    worker_id: WorkerId,
+    props: PlatformProperties,
+    max_inflight_tasks: u64,
+) -> Result<mpsc::UnboundedReceiver<UpdateForWorker>, Error> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let worker = Worker::new(worker_id.clone(), props, tx, NOW_TIME, max_inflight_tasks);
+    scheduler
+        .add_worker(worker)
+        .await
+        .err_tip(|| "Failed to add worker")?;
+    tokio::task::yield_now().await; // Allow task<->worker matcher to run.
+    verify_initial_connection_message(worker_id, &mut rx).await;
+    Ok(rx)
+}
+
+#[nativelink_test]
+async fn batch_matching_does_not_oversubscribe_a_worker() -> Result<(), Error> {
+    const ACTION_COUNT: u8 = 5;
+    const MAX_INFLIGHT_TASKS: u64 = 2;
+
+    let worker_id = WorkerId("worker_id".to_string());
+    let task_change_notify = Arc::new(Notify::new());
+    let (scheduler, _worker_scheduler) = SimpleScheduler::new_with_callback(
+        &SimpleSpec {
+            enable_batch_worker_matching: true,
+            batch_interval_ms: 20,
+            batch_debounce_ms: 2,
+            ..Default::default()
+        },
+        memory_awaited_action_db_factory(
+            0,
+            &task_change_notify.clone(),
+            MockInstantWrapped::default,
+        ),
+        || async move {},
+        task_change_notify,
+        MockInstantWrapped::default,
+        None,
+    );
+
+    // Queue five actions before any worker joins, so that one batch cycle sees
+    // all of them at once.
+    let mut action_listeners = Vec::new();
+    for index in 0..ACTION_COUNT {
+        action_listeners.push(
+            setup_action(
+                &scheduler,
+                DigestInfo::new([index; 32], 512),
+                HashMap::new(),
+                make_system_time(u64::from(index) + 1),
+            )
+            .await?,
+        );
+    }
+
+    let mut rx_from_worker = setup_new_worker_with_task_limit(
+        &scheduler,
+        worker_id,
+        PlatformProperties::default(),
+        MAX_INFLIGHT_TASKS,
+    )
+    .await?;
+
+    // The worker takes exactly `MAX_INFLIGHT_TASKS` actions.
+    for _ in 0..MAX_INFLIGHT_TASKS {
+        let msg_for_worker = tokio::time::timeout(Duration::from_secs(5), rx_from_worker.recv())
+            .await
+            .expect("Timed out waiting for the worker to receive an action")
+            .unwrap();
+        assert!(matches!(
+            msg_for_worker.update,
+            Some(update_for_worker::Update::StartAction(_))
+        ));
+    }
+
+    // No further action reaches the worker while it is full.
+    let extra_msg = tokio::time::timeout(Duration::from_millis(500), rx_from_worker.recv()).await;
+    assert!(
+        extra_msg.is_err(),
+        "Worker received more actions than max_inflight_tasks allows: {extra_msg:?}"
+    );
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn batch_matching_assigns_and_notifies_the_worker() -> Result<(), Error> {
+    let worker_id = WorkerId("worker_id".to_string());
+    let task_change_notify = Arc::new(Notify::new());
+    let (scheduler, _worker_scheduler) = SimpleScheduler::new_with_callback(
+        &SimpleSpec::default(),
+        memory_awaited_action_db_factory(
+            0,
+            &task_change_notify.clone(),
+            MockInstantWrapped::default,
+        ),
+        || async move {},
+        task_change_notify,
+        MockInstantWrapped::default,
+        None,
+    );
+    let action_digest = DigestInfo::new([98u8; 32], 512);
+
+    let mut rx_from_worker =
+        setup_new_worker(&scheduler, worker_id.clone(), PlatformProperties::default()).await?;
+    let insert_timestamp = make_system_time(1);
+    let mut action_listener =
+        setup_action(&scheduler, action_digest, HashMap::new(), insert_timestamp).await?;
+
+    scheduler.do_try_match_batch_for_test().await?;
+
+    let msg_for_worker = rx_from_worker.recv().await.unwrap();
+    let update_for_worker::Update::StartAction(start_action) = msg_for_worker.update.unwrap()
+    else {
+        panic!("Expected the worker to receive an action");
+    };
+    assert_eq!(start_action.worker_id, "worker_id");
+
+    let (action_state, _maybe_origin_metadata) = action_listener.changed().await.unwrap();
+    assert_eq!(action_state.stage, ActionStage::Executing);
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn batch_matching_reads_past_actions_that_cannot_run() -> Result<(), Error> {
+    // More unmatchable actions than one round of the queue scan reads.
+    const UNMATCHABLE_ACTIONS: u8 = 40;
+
+    let worker_id = WorkerId("worker_id".to_string());
+    let task_change_notify = Arc::new(Notify::new());
+    let (scheduler, _worker_scheduler) = SimpleScheduler::new_with_callback(
+        &SimpleSpec {
+            supported_platform_properties: Some(HashMap::from([(
+                "cpu".to_string(),
+                PropertyType::Minimum,
+            )])),
+            enable_batch_worker_matching: true,
+            batch_interval_ms: 20,
+            batch_debounce_ms: 2,
+            ..Default::default()
+        },
+        memory_awaited_action_db_factory(
+            0,
+            &task_change_notify.clone(),
+            MockInstantWrapped::default,
+        ),
+        || async move {},
+        task_change_notify,
+        MockInstantWrapped::default,
+        None,
+    );
+
+    // The head of the queue asks for more cpu than the worker has.
+    let mut action_listeners = Vec::new();
+    for index in 0..UNMATCHABLE_ACTIONS {
+        action_listeners.push(
+            setup_action(
+                &scheduler,
+                DigestInfo::new([index; 32], 512),
+                HashMap::from([("cpu".to_string(), "16".to_string())]),
+                make_system_time(u64::from(index) + 1),
+            )
+            .await?,
+        );
+    }
+    // The tail of the queue holds one action that the worker can run.
+    let _small_action_listener = setup_action(
+        &scheduler,
+        DigestInfo::new([200u8; 32], 512),
+        HashMap::from([("cpu".to_string(), "2".to_string())]),
+        make_system_time(u64::from(UNMATCHABLE_ACTIONS) + 1),
+    )
+    .await?;
+
+    let mut rx_from_worker = setup_new_worker_with_task_limit(
+        &scheduler,
+        worker_id,
+        PlatformProperties::new(HashMap::from([(
+            "cpu".to_string(),
+            PlatformPropertyValue::Minimum(4),
+        )])),
+        1,
+    )
+    .await?;
+
+    let msg_for_worker = tokio::time::timeout(Duration::from_secs(5), rx_from_worker.recv())
+        .await
+        .expect("Timed out waiting for the worker to receive the action of the queue tail")
+        .unwrap();
+    let update_for_worker::Update::StartAction(start_action) = msg_for_worker.update.unwrap()
+    else {
+        panic!("Expected the worker to receive an action");
+    };
+    assert_eq!(
+        start_action.platform.unwrap().properties,
+        vec![platform::Property {
+            name: "cpu".to_string(),
+            value: "2".to_string(),
+        }]
+    );
+
+    Ok(())
+}
