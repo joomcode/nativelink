@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::sync::atomic::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -209,6 +210,76 @@ async fn available_capacity_counts_free_slots() -> Result<(), Error> {
     let capacity = scheduler.available_capacity().await;
     assert_eq!(capacity.available_workers, 3);
     assert_eq!(capacity.free_slots, None);
+    Ok(())
+}
+
+#[nativelink_test]
+async fn batch_match_counts_only_the_workers_it_examines() -> Result<(), Error> {
+    let scheduler = make_scheduler(WorkerAllocationStrategy::default());
+    let mut receivers = Vec::new();
+    for name in ["first", "second", "third"] {
+        receivers.push(add_worker(&scheduler, name, PlatformProperties::default(), 1).await?);
+    }
+
+    // Six actions with no properties, three workers with one slot each.
+    let empty = PlatformProperties::default();
+    let actions: Vec<&PlatformProperties> = vec![&empty; 6];
+    let matches = scheduler
+        .batch_find_workers_for_actions(&actions, false)
+        .await;
+    assert_eq!(matches.iter().flatten().count(), 3);
+
+    let metrics = scheduler.get_metrics();
+    assert_eq!(metrics.find_worker_hits.load(Ordering::Relaxed), 3);
+    // The pool filled up after three actions, so the pass never examined the
+    // last three actions.
+    assert_eq!(metrics.find_worker_misses.load(Ordering::Relaxed), 3);
+    // The pass reads the three workers once for the snapshot, and then examines
+    // one worker per match. The product of workers and actions would be 18.
+    assert_eq!(metrics.workers_iterated.load(Ordering::Relaxed), 6);
+    Ok(())
+}
+
+#[nativelink_test]
+async fn batch_match_reports_a_full_pool_without_a_scan() -> Result<(), Error> {
+    let scheduler = make_scheduler(WorkerAllocationStrategy::default());
+    let worker_id = WorkerId("worker".to_string());
+    let _rx = add_worker(&scheduler, "worker", PlatformProperties::default(), 1).await?;
+    scheduler.set_drain_worker(&worker_id, true).await?;
+
+    let empty = PlatformProperties::default();
+    let actions: Vec<&PlatformProperties> = vec![&empty; 4];
+    let matches = scheduler
+        .batch_find_workers_for_actions(&actions, false)
+        .await;
+    assert_eq!(matches.iter().flatten().count(), 0);
+
+    let metrics = scheduler.get_metrics();
+    assert_eq!(metrics.find_worker_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.find_worker_misses.load(Ordering::Relaxed), 4);
+    // The pass reads the worker once for the snapshot, and then stops.
+    assert_eq!(metrics.workers_iterated.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+
+#[nativelink_test]
+async fn sequential_match_counts_only_the_workers_it_examines() -> Result<(), Error> {
+    let scheduler = make_scheduler(WorkerAllocationStrategy::LeastRecentlyUsed);
+    let mut receivers = Vec::new();
+    for name in ["first", "second", "third"] {
+        receivers.push(add_worker(&scheduler, name, PlatformProperties::default(), 1).await?);
+    }
+
+    let worker_id = scheduler
+        .find_worker_for_action(&PlatformProperties::default(), false)
+        .await;
+    assert_eq!(worker_id, Some(WorkerId("first".to_string())));
+
+    let metrics = scheduler.get_metrics();
+    assert_eq!(metrics.find_worker_hits.load(Ordering::Relaxed), 1);
+    // The capacity check stops at the first worker of the pool, and the scan
+    // stops at the first match. The whole pool would be three workers.
+    assert_eq!(metrics.workers_iterated.load(Ordering::Relaxed), 2);
     Ok(())
 }
 
