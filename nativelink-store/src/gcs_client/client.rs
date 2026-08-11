@@ -259,7 +259,7 @@ impl GcsClient {
                 500..=599 => Code::Unavailable,
                 _ => Code::Unknown,
             },
-            GcsError::HttpClient(resp) => match resp.status() {
+            GcsError::HttpClient(resp) | GcsError::RawResponse(resp, _) => match resp.status() {
                 Some(http::StatusCode::NOT_FOUND) => Code::NotFound,
                 Some(http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN) => {
                     Code::PermissionDenied
@@ -268,6 +268,11 @@ impl GcsClient {
                     Code::ResourceExhausted
                 }
                 Some(code) if code.is_server_error() => Code::Unavailable,
+                // A transport failure carries no status code. Classify it so
+                // that callers and the retrier can tell a client-side deadline
+                // apart from a genuinely unknown fault.
+                None if resp.is_timeout() => Code::DeadlineExceeded,
+                None if resp.is_connect() => Code::Unavailable,
                 _ => Code::Unknown,
             },
             _ => Code::Internal,
