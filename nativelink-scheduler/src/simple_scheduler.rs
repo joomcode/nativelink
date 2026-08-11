@@ -539,6 +539,10 @@ impl SimpleScheduler {
             if full_worker_logging {
                 info!("All workers are fully allocated");
             }
+            // This cycle reports no action outcome, so mark the skip.
+            self.worker_scheduler
+                .worker_metrics()
+                .record_find_worker_skipped_cycle();
             return Ok(());
         }
 

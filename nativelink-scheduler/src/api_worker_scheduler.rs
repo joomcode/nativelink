@@ -31,7 +31,10 @@ use nativelink_proto::com::github::trace_machina::nativelink::events::{
 };
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::ActionResourceUsage;
 use nativelink_util::action_messages::{OperationId, WorkerId};
-use nativelink_util::metrics::{WORKER_POOL_INSTANCE, WORKER_POOL_METRICS, WorkerPoolMetricAttrs};
+use nativelink_util::metrics::{
+    WORKER_POOL_INSTANCE, WORKER_POOL_METRICS, WorkerFindMode, WorkerFindResult,
+    WorkerPoolMetricAttrs,
+};
 use nativelink_util::operation_state_manager::{UpdateOperationType, WorkerStateManager};
 use nativelink_util::origin_event::get_node_id;
 use nativelink_util::platform_properties::PlatformProperties;
@@ -84,6 +87,25 @@ pub struct WorkerPoolCapacity {
     /// Total number of free inflight slots over all available workers.
     /// `None` means that at least one available worker has no inflight limit.
     pub free_slots: Option<u64>,
+}
+
+/// What one pass of the worker matcher did.
+///
+/// The three action counters add up to the number of actions that the pass
+/// received. `hits` and `misses` cover the actions that the matcher examined,
+/// and `no_capacity` covers the actions that it skipped because every worker
+/// was full.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FindWorkerPass {
+    /// Actions that a worker took.
+    pub hits: u64,
+    /// Actions that the matcher examined and no worker took.
+    pub misses: u64,
+    /// Actions that the matcher skipped, because every worker was full.
+    pub no_capacity: u64,
+    /// Workers that the matcher examined over the whole pass. A worker that the
+    /// pass examines twice counts twice.
+    pub workers_iterated: u64,
 }
 
 #[derive(Debug)]
@@ -153,6 +175,57 @@ impl WorkerSchedulerMetrics {
         WORKER_POOL_METRICS
             .worker_dispatch_failures
             .add(1, self.attrs.evicted());
+    }
+
+    /// Records one pass of the worker matcher.
+    ///
+    /// The counters carry the outcome of every action of the pass, so
+    /// `hit / (hit + miss)` is the match rate over the actions that the matcher
+    /// examined, and `no_capacity` holds the actions that a full pool pushed
+    /// back. `workers_iterated` counts the workers that the matcher really
+    /// examined, so `workers_iterated / (hit + miss)` is the average scan depth
+    /// per examined action.
+    ///
+    /// The duration covers the whole pass, including the wait for the read lock.
+    /// One sequential pass covers one action, and one batch pass covers a group
+    /// of actions, so read the histogram per `worker_pool_find_mode`.
+    pub fn record_find_worker(
+        &self,
+        mode: WorkerFindMode,
+        pass: &FindWorkerPass,
+        elapsed: Duration,
+    ) {
+        for (result, count) in [
+            (WorkerFindResult::Hit, pass.hits),
+            (WorkerFindResult::Miss, pass.misses),
+            (WorkerFindResult::NoCapacity, pass.no_capacity),
+        ] {
+            if count > 0 {
+                WORKER_POOL_METRICS
+                    .find_worker_actions
+                    .add(count, self.attrs.find_result(mode, result));
+            }
+        }
+        if pass.workers_iterated > 0 {
+            WORKER_POOL_METRICS
+                .find_worker_workers_iterated
+                .add(pass.workers_iterated, self.attrs.find_pass(mode));
+        }
+        WORKER_POOL_METRICS
+            .find_worker_pass_duration
+            .record(elapsed.as_secs_f64(), self.attrs.find_pass(mode));
+    }
+
+    /// Records a matching cycle that never reached the matcher, because every
+    /// worker was full.
+    ///
+    /// The batch matcher does not read the queue in that case, so it cannot
+    /// report the queued actions. This counter makes the gap in
+    /// `worker_pool_find_worker_actions` visible.
+    pub fn record_find_worker_skipped_cycle(&self) {
+        WORKER_POOL_METRICS
+            .find_worker_skipped_cycles
+            .add(1, self.attrs.find_pass(WorkerFindMode::Batch));
     }
 
     #[must_use]
@@ -329,17 +402,29 @@ impl ApiWorkerSchedulerImpl {
         Ok(())
     }
 
+    /// Finds a worker for one action. The second value reports what the pass
+    /// examined, for the metrics.
     fn inner_find_worker_for_action(
         &self,
         platform_properties: &PlatformProperties,
         full_worker_logging: bool,
-    ) -> Option<WorkerId> {
+    ) -> (Option<WorkerId>, FindWorkerPass) {
+        let mut pass = FindWorkerPass::default();
+
         // Do a fast check to see if any workers are available at all for work allocation
-        if !self.workers.iter().any(|(_, w)| w.can_accept_work()) {
+        let mut prescanned = 0;
+        let has_capacity = self
+            .workers
+            .iter()
+            .inspect(|_| prescanned += 1)
+            .any(|(_, w)| w.can_accept_work());
+        pass.workers_iterated += prescanned;
+        if !has_capacity {
             if full_worker_logging {
                 info!("All workers are fully allocated");
             }
-            return None;
+            pass.no_capacity = 1;
+            return (None, pass);
         }
 
         // Use capability index to get candidate workers that match STATIC properties
@@ -355,7 +440,8 @@ impl ApiWorkerSchedulerImpl {
             if full_worker_logging {
                 info!("No workers in capability index match required properties");
             }
-            return None;
+            pass.misses = 1;
+            return (None, pass);
         }
         let is_candidate = |worker_id: &WorkerId| -> bool {
             self.capability_index
@@ -392,24 +478,35 @@ impl ApiWorkerSchedulerImpl {
         // Iterate in LRU order based on allocation strategy.
         let workers_iter = self.workers.iter();
 
+        // The scan stops at the first match, so count the workers that the scan
+        // really pulls from the pool.
+        let mut scanned = 0;
         let worker_id = match self.allocation_strategy {
             // Use rfind to get the least recently used that satisfies the properties.
             WorkerAllocationStrategy::LeastRecentlyUsed => workers_iter
                 .rev()
+                .inspect(|_| scanned += 1)
                 .filter(|(worker_id, _)| is_candidate(worker_id))
                 .find(&worker_matches)
                 .map(|(_, w)| w.id.clone()),
 
             // Use find to get the most recently used that satisfies the properties.
             WorkerAllocationStrategy::MostRecentlyUsed => workers_iter
+                .inspect(|_| scanned += 1)
                 .filter(|(worker_id, _)| is_candidate(worker_id))
                 .find(&worker_matches)
                 .map(|(_, w)| w.id.clone()),
         };
-        if full_worker_logging && worker_id.is_none() {
-            warn!("No workers matched!");
+        pass.workers_iterated += scanned;
+        if worker_id.is_some() {
+            pass.hits = 1;
+        } else {
+            pass.misses = 1;
+            if full_worker_logging {
+                warn!("No workers matched!");
+            }
         }
-        worker_id
+        (worker_id, pass)
     }
 
     /// Returns how much work the pool can accept right now.
@@ -445,11 +542,13 @@ impl ApiWorkerSchedulerImpl {
     /// The pass keeps a working copy of the capacity of each worker, so a worker
     /// never receives more work than `max_inflight_tasks` allows and the
     /// `Minimum` properties of the earlier matches limit the later matches.
+    ///
+    /// The second value reports what the pass examined, for the metrics.
     fn inner_batch_find_workers_for_actions(
         &self,
         actions: &[&PlatformProperties],
         full_worker_logging: bool,
-    ) -> Vec<Option<WorkerId>> {
+    ) -> (Vec<Option<WorkerId>>, FindWorkerPass) {
         /// A worker that can take at least one more action in this pass.
         struct AvailableWorker<'a> {
             slot: WorkerSlot,
@@ -462,9 +561,13 @@ impl ApiWorkerSchedulerImpl {
         }
 
         let mut results: Vec<Option<WorkerId>> = vec![None; actions.len()];
+        let mut pass = FindWorkerPass::default();
         if actions.is_empty() {
-            return results;
+            return (results, pass);
         }
+
+        // The snapshot below reads every worker of the pool once.
+        pass.workers_iterated = self.workers.len() as u64;
 
         // Snapshot the workers that can accept work. The order follows the
         // allocation strategy, because the LRU cache holds the most recently
@@ -505,13 +608,16 @@ impl ApiWorkerSchedulerImpl {
             if full_worker_logging {
                 info!("All workers are fully allocated");
             }
-            return results;
+            pass.no_capacity = actions.len() as u64;
+            return (results, pass);
         }
 
         let mut candidates = WorkerSlotSet::new();
         for (idx, platform_properties) in actions.iter().enumerate() {
             if available.is_empty() {
                 // Every worker is full, so the rest of the batch has to wait.
+                // The matcher never examined these actions.
+                pass.no_capacity = (actions.len() - idx) as u64;
                 break;
             }
 
@@ -520,22 +626,32 @@ impl ApiWorkerSchedulerImpl {
                 full_worker_logging,
                 &mut candidates,
             ) {
+                pass.misses += 1;
                 continue;
             }
 
-            let Some(position) = available.iter().position(|worker| {
+            // The scan stops at the first match, so count the workers that this
+            // action really examined.
+            let mut scanned = 0;
+            let maybe_position = available.iter().position(|worker| {
+                scanned += 1;
                 candidates.contains(worker.slot)
                     && platform_properties.is_satisfied_by(&worker.properties, full_worker_logging)
-            }) else {
+            });
+            pass.workers_iterated += scanned;
+
+            let Some(position) = maybe_position else {
                 if full_worker_logging {
                     info!("No workers matched!");
                 }
+                pass.misses += 1;
                 continue;
             };
 
             let worker = &mut available[position];
             reduce_platform_properties(&mut worker.properties, platform_properties);
             results[idx] = Some(worker.id.clone());
+            pass.hits += 1;
             worker.free_slots = worker.free_slots.saturating_sub(1);
             if worker.free_slots == 0 {
                 // Keep the remaining workers in allocation-strategy order.
@@ -543,7 +659,7 @@ impl ApiWorkerSchedulerImpl {
             }
         }
 
-        results
+        (results, pass)
     }
 
     async fn update_action(
@@ -865,7 +981,7 @@ impl ApiWorkerScheduler {
 
     /// Returns a reference to the worker scheduler metrics for recording OTEL metrics.
     #[must_use]
-    pub const fn workerMetrics(&self) -> &WorkerSchedulerMetrics {
+    pub const fn worker_metrics(&self) -> &WorkerSchedulerMetrics {
         &self.worker_scheduler_metrics
     }
 
@@ -964,13 +1080,13 @@ impl ApiWorkerScheduler {
             .fetch_add(1, Ordering::Relaxed);
 
         let inner = self.inner.read().await;
-        let worker_count = inner.workers.len() as u64;
-        let result = inner.inner_find_worker_for_action(platform_properties, full_worker_logging);
+        let (result, pass) =
+            inner.inner_find_worker_for_action(platform_properties, full_worker_logging);
+        drop(inner);
 
-        // Track workers iterated (worst case is all workers)
         self.metrics
             .workers_iterated
-            .fetch_add(worker_count, Ordering::Relaxed);
+            .fetch_add(pass.workers_iterated, Ordering::Relaxed);
 
         if result.is_some() {
             self.metrics
@@ -982,10 +1098,13 @@ impl ApiWorkerScheduler {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
+        let elapsed = start.elapsed();
         #[allow(clippy::cast_possible_truncation)]
         self.metrics
             .find_worker_time_ns
-            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        self.worker_scheduler_metrics
+            .record_find_worker(WorkerFindMode::Sequential, &pass, elapsed);
         result
     }
 
@@ -1015,27 +1134,30 @@ impl ApiWorkerScheduler {
             .fetch_add(actions.len() as u64, Ordering::Relaxed);
 
         let inner = self.inner.read().await;
-        let worker_count = inner.workers.len() as u64;
-        let results = inner.inner_batch_find_workers_for_actions(actions, full_worker_logging);
+        let (results, pass) =
+            inner.inner_batch_find_workers_for_actions(actions, full_worker_logging);
+        drop(inner);
 
         // Track metrics
         self.metrics
             .workers_iterated
-            .fetch_add(worker_count * actions.len() as u64, Ordering::Relaxed);
-
-        let hits = results.iter().filter(|result| result.is_some()).count() as u64;
-        let misses = actions.len() as u64 - hits;
+            .fetch_add(pass.workers_iterated, Ordering::Relaxed);
         self.metrics
             .find_worker_hits
-            .fetch_add(hits, Ordering::Relaxed);
+            .fetch_add(pass.hits, Ordering::Relaxed);
+        // The legacy counters have no bucket for a full pool, so the actions
+        // that the pool pushed back count as misses.
         self.metrics
             .find_worker_misses
-            .fetch_add(misses, Ordering::Relaxed);
+            .fetch_add(pass.misses.saturating_add(pass.no_capacity), Ordering::Relaxed);
 
+        let elapsed = start.elapsed();
         #[allow(clippy::cast_possible_truncation)]
         self.metrics
             .find_worker_time_ns
-            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        self.worker_scheduler_metrics
+            .record_find_worker(WorkerFindMode::Batch, &pass, elapsed);
 
         results
     }

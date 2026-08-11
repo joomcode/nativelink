@@ -873,6 +873,8 @@ pub fn execution_output_bytes(action_result: &ActionResult) -> u64 {
 pub const WORKER_POOL_INSTANCE: &str = "worker_pool_instance";
 pub const WORKER_EVENT_TYPE: &str = "worker_pool_event_type";
 pub const WORKER_STATE: &str = "worker_pool_state";
+pub const WORKER_POOL_FIND_RESULT: &str = "worker_pool_find_result";
+pub const WORKER_POOL_FIND_MODE: &str = "worker_pool_find_mode";
 
 /// Worker event types for metrics classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -922,9 +924,76 @@ impl From<WorkerState> for Value {
     }
 }
 
+/// The matcher that looked for a worker.
+///
+/// One scheduler instance runs one mode, selected by the
+/// `enable_batch_worker_matching` option. The mode also gives the unit of one
+/// pass: the sequential matcher makes one pass per action, and the batch
+/// matcher makes one pass per group of actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerFindMode {
+    /// One action per pass, one lock acquisition per action.
+    Sequential,
+    /// Many actions per pass, one lock acquisition per pass.
+    Batch,
+}
+
+impl WorkerFindMode {
+    const fn as_index(self) -> usize {
+        match self {
+            Self::Sequential => 0,
+            Self::Batch => 1,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Batch => "batch",
+        }
+    }
+}
+
+/// The outcome for one action that the worker matcher considered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerFindResult {
+    /// A worker took the action.
+    Hit,
+    /// The matcher examined the pool and no worker matched the properties.
+    Miss,
+    /// The matcher did not examine the action, because every worker was full.
+    NoCapacity,
+}
+
+impl WorkerFindResult {
+    const fn as_index(self) -> usize {
+        match self {
+            Self::Hit => 0,
+            Self::Miss => 1,
+            Self::NoCapacity => 2,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::NoCapacity => "no_capacity",
+        }
+    }
+}
+
+const WORKER_FIND_MODES: [WorkerFindMode; 2] = [WorkerFindMode::Sequential, WorkerFindMode::Batch];
+const WORKER_FIND_RESULTS: [WorkerFindResult; 3] = [
+    WorkerFindResult::Hit,
+    WorkerFindResult::Miss,
+    WorkerFindResult::NoCapacity,
+];
+
 /// Pre-allocated attribute combinations for efficient worker metrics collection.
 #[derive(Debug)]
 pub struct WorkerPoolMetricAttrs {
+    base: Vec<KeyValue>,
     added: Vec<KeyValue>,
     removed: Vec<KeyValue>,
     timeout: Vec<KeyValue>,
@@ -933,6 +1002,10 @@ pub struct WorkerPoolMetricAttrs {
     state_available: Vec<KeyValue>,
     state_paused: Vec<KeyValue>,
     state_draining: Vec<KeyValue>,
+    /// Attributes per matcher mode, for the metrics of a whole pass.
+    find_pass: [Vec<KeyValue>; WORKER_FIND_MODES.len()],
+    /// Attributes per matcher mode and per action outcome.
+    find_result: [[Vec<KeyValue>; WORKER_FIND_RESULTS.len()]; WORKER_FIND_MODES.len()],
 }
 
 impl WorkerPoolMetricAttrs {
@@ -950,7 +1023,20 @@ impl WorkerPoolMetricAttrs {
             attrs
         };
 
+        let make_pass_attrs = |mode: WorkerFindMode| {
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(KeyValue::new(WORKER_POOL_FIND_MODE, mode.as_str()));
+            attrs
+        };
+
+        let make_result_attrs = |mode: WorkerFindMode, result: WorkerFindResult| {
+            let mut attrs = make_pass_attrs(mode);
+            attrs.push(KeyValue::new(WORKER_POOL_FIND_RESULT, result.as_str()));
+            attrs
+        };
+
         Self {
+            base: base_attrs.to_vec(),
             added: make_event_attrs(WorkerEventType::Added),
             removed: make_event_attrs(WorkerEventType::Removed),
             timeout: make_event_attrs(WorkerEventType::Timeout),
@@ -959,6 +1045,9 @@ impl WorkerPoolMetricAttrs {
             state_available: make_state_attrs(WorkerState::Available),
             state_paused: make_state_attrs(WorkerState::Paused),
             state_draining: make_state_attrs(WorkerState::Draining),
+            find_pass: WORKER_FIND_MODES.map(make_pass_attrs),
+            find_result: WORKER_FIND_MODES
+                .map(|mode| WORKER_FIND_RESULTS.map(|result| make_result_attrs(mode, result))),
         }
     }
 
@@ -993,6 +1082,20 @@ impl WorkerPoolMetricAttrs {
     #[must_use]
     pub fn state_draining(&self) -> &[KeyValue] {
         &self.state_draining
+    }
+    #[must_use]
+    pub fn base(&self) -> &[KeyValue] {
+        &self.base
+    }
+    /// Attributes for the metrics of a whole pass of the given matcher.
+    #[must_use]
+    pub fn find_pass(&self, mode: WorkerFindMode) -> &[KeyValue] {
+        &self.find_pass[mode.as_index()]
+    }
+    /// Attributes for one action outcome of the given matcher.
+    #[must_use]
+    pub fn find_result(&self, mode: WorkerFindMode, result: WorkerFindResult) -> &[KeyValue] {
+        &self.find_result[mode.as_index()][result.as_index()]
     }
 }
 
@@ -1036,6 +1139,46 @@ pub static WORKER_POOL_METRICS: LazyLock<WorkerPoolMetrics> = LazyLock::new(|| {
             .with_description("Total number of action dispatch failures")
             .with_unit("{failure}")
             .build(),
+
+        find_worker_actions: meter
+            .u64_counter("worker_pool_find_worker_actions")
+            .with_description(
+                "Queued actions that reached the worker matcher, by matcher and outcome",
+            )
+            .with_unit("{action}")
+            .build(),
+
+        find_worker_workers_iterated: meter
+            .u64_counter("worker_pool_find_worker_workers_iterated")
+            .with_description("Workers that the matcher examined, counted per examined worker")
+            .with_unit("{worker}")
+            .build(),
+
+        find_worker_skipped_cycles: meter
+            .u64_counter("worker_pool_find_worker_skipped_cycles")
+            .with_description(
+                "Matching cycles that did not read the queue, because every worker was full",
+            )
+            .with_unit("{cycle}")
+            .build(),
+
+        find_worker_pass_duration: meter
+            .f64_histogram("worker_pool_find_worker_pass_duration")
+            .with_description(
+                "Duration of one matcher pass in seconds. \
+                 A sequential pass covers one action, and a batch pass covers a group of actions",
+            )
+            .with_unit("s")
+            .with_boundaries(vec![
+                0.000_01, // 10us
+                0.000_1,  // 100us
+                0.001,    // 1ms
+                0.01,     // 10ms
+                0.1,      // 100ms
+                1.0,      // 1s
+                10.0,     // 10s
+            ])
+            .build(),
     }
 });
 
@@ -1054,6 +1197,14 @@ pub struct WorkerPoolMetrics {
     pub worker_actions_completed: metrics::Counter<u64>,
     /// Counter of action dispatch failures
     pub worker_dispatch_failures: metrics::Counter<u64>,
+    /// Counter of actions that reached the matcher, split by matcher and outcome
+    pub find_worker_actions: metrics::Counter<u64>,
+    /// Counter of workers that the matcher examined
+    pub find_worker_workers_iterated: metrics::Counter<u64>,
+    /// Counter of matching cycles that skipped the queue, because the pool was full
+    pub find_worker_skipped_cycles: metrics::Counter<u64>,
+    /// Histogram of the duration of one matcher pass in seconds
+    pub find_worker_pass_duration: metrics::Histogram<f64>,
 }
 
 // Metric attribute keys for local worker operations.
