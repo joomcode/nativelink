@@ -702,6 +702,87 @@ async fn has_refreshes_custom_time_for_present_blob_only() -> Result<(), Error> 
 }
 
 #[nativelink_test]
+async fn has_skips_custom_time_refreshed_by_another_process() -> Result<(), Error> {
+    // Every pod holds the same hot blobs. If each pod decides on its own local
+    // map, the write rate for one object scales with the pod count and exceeds
+    // the GCS per-object write limit. The `customTime` returned by the metadata
+    // read is authoritative, so a stamp written elsewhere must suppress ours.
+    let refresh_interval_s = 3600u32;
+    let mock_ops = Arc::new(MockGcsOperations::new());
+    let store = create_test_store_with_custom_time(mock_ops.clone(), refresh_interval_s).await?;
+
+    let base_timestamp = 1_000_000u64;
+    let key: StoreKey = to_store_key(DigestInfo::try_new(VALID_HASH1, 5)?);
+    let object_path = create_object_path(&key);
+    mock_ops
+        .add_object_with_custom_time(&object_path, vec![1, 2, 3, 4, 5], base_timestamp as i64)
+        .await;
+
+    // Well inside the refresh window, whatever jitter this process picked.
+    MockClock::set_time(Duration::from_secs(base_timestamp + 100));
+    assert_eq!(store.has(key.clone()).await?, Some(5));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        custom_time_update_secs(&mock_ops.get_requests().await, &object_path).is_empty(),
+        "A customTime written by another process must suppress this process's write",
+    );
+
+    // Past the window for every possible jitter value, this process refreshes.
+    let later = base_timestamp + (u64::from(refresh_interval_s) * 3) / 2 + 10;
+    MockClock::set_time(Duration::from_secs(later));
+    assert_eq!(store.has(key).await?, Some(5));
+    let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 1).await;
+    assert_eq!(
+        stamps,
+        vec![later as i64],
+        "A customTime older than the refresh window must be re-stamped",
+    );
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn custom_time_touches_are_capped_and_dropped() -> Result<(), Error> {
+    // The touch budget must never let metadata writes take every connection
+    // permit. Overflow is dropped, not queued, and the dropped objects stay
+    // stale so a later existence check retries them.
+    let mock_ops = Arc::new(MockGcsOperations::new());
+    mock_ops.hold_custom_time_updates();
+    let store = create_test_store_with_custom_time(mock_ops.clone(), 3600).await?;
+
+    MockClock::set_time(Duration::from_secs(1_000_000));
+
+    // The default budget is max_concurrent_uploads / 4 == 2. Ten distinct
+    // objects therefore produce at most two in-flight PATCH calls.
+    let mut keys = Vec::new();
+    for size in 1..=10u64 {
+        let key: StoreKey = to_store_key(DigestInfo::try_new(VALID_HASH1, size)?);
+        let path = create_object_path(&key);
+        mock_ops
+            .add_object(&path, vec![0u8; usize::try_from(size)?])
+            .await;
+        keys.push(key);
+    }
+    for key in keys {
+        store.has(key).await?;
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let dispatched = mock_ops
+        .get_call_counts()
+        .custom_time_update_calls
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        dispatched, 2,
+        "The touch budget must cap in-flight customTime writes at 2, saw {dispatched}",
+    );
+
+    mock_ops.release_custom_time_updates();
+
+    Ok(())
+}
+
+#[nativelink_test]
 async fn large_file_update_test() -> Result<(), Error> {
     const DATA_SIZE: usize = 11 * 1024 * 1024; // 11MB to exceed SIMPLE_UPLOAD_THRESHOLD
 

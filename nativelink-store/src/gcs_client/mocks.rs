@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures::Stream;
 use nativelink_error::{Code, Error, make_err};
 use nativelink_util::buf_channel::DropCloserReadHalf;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
 use crate::gcs_client::client::GcsOperations;
 use crate::gcs_client::types::{DEFAULT_CONTENT_TYPE, GcsObject, ObjectPath, Timestamp};
@@ -39,6 +39,10 @@ pub struct MockGcsOperations {
     call_counts: CallCounts,
     // For capturing requests to verify correct parameter passing
     requests: RwLock<Vec<MockRequest>>,
+    // When set, `update_object_custom_time` blocks until the gate is released.
+    // Lets a test hold customTime writes in flight and inspect concurrency.
+    hold_custom_time_updates: AtomicBool,
+    custom_time_gate: Notify,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +142,22 @@ impl MockGcsOperations {
             failure_mode: RwLock::new(FailureMode::None),
             call_counts: CallCounts::default(),
             requests: RwLock::new(Vec::new()),
+            hold_custom_time_updates: AtomicBool::new(false),
+            custom_time_gate: Notify::new(),
         }
+    }
+
+    /// Hold every later `update_object_custom_time` call open until
+    /// [`Self::release_custom_time_updates`] runs.
+    pub fn hold_custom_time_updates(&self) {
+        self.hold_custom_time_updates.store(true, Ordering::Relaxed);
+    }
+
+    /// Release the calls held by [`Self::hold_custom_time_updates`].
+    pub fn release_custom_time_updates(&self) {
+        self.hold_custom_time_updates
+            .store(false, Ordering::Relaxed);
+        self.custom_time_gate.notify_waiters();
     }
 
     /// Set whether operations should fail or not
@@ -274,6 +293,25 @@ impl MockGcsOperations {
 
         let mock_object = MockObject { metadata, content };
         self.objects.write().await.insert(object_key, mock_object);
+    }
+
+    /// Add a mock object that already carries a `customTime`, as if another
+    /// process had stamped it. The seeding is silent: it records no request and
+    /// bumps no call counter.
+    pub async fn add_object_with_custom_time(
+        &self,
+        path: &ObjectPath,
+        content: Vec<u8>,
+        custom_time_unix_secs: i64,
+    ) {
+        self.add_object(path, content).await;
+        let object_key = self.get_object_key(path);
+        if let Some(obj) = self.objects.write().await.get_mut(&object_key) {
+            obj.metadata.custom_time = Some(Timestamp {
+                seconds: custom_time_unix_secs,
+                nanos: 0,
+            });
+        }
     }
 
     /// Get the current timestamp
@@ -548,6 +586,12 @@ impl GcsOperations for MockGcsOperations {
                 object_path: object_path.clone(),
                 custom_time_unix_secs,
             });
+
+        // The call is counted before the gate, so a test can observe how many
+        // writes are in flight while they are held open.
+        if self.hold_custom_time_updates.load(Ordering::Relaxed) {
+            self.custom_time_gate.notified().await;
+        }
 
         self.handle_failure().await?;
 

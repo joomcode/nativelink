@@ -621,8 +621,10 @@ async fn test_gcs_client_error_mapping() -> Result<(), Error> {
     let client = GcsClient::new_mock(&spec, format!("http://127.0.0.1:{unused_port}")).unwrap();
     let object_path = ObjectPath::new("test-bucket".to_string(), "test-path");
 
+    // A refused connection carries no HTTP status. It is a transient transport
+    // fault, so it must map to `Unavailable` and stay retriable.
     let err = client.read_object_metadata(&object_path).await.unwrap_err();
-    assert_eq!(err.code, Code::Unknown);
+    assert_eq!(err.code, Code::Unavailable);
 
     Ok(())
 }

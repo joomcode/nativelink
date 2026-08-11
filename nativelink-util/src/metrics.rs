@@ -1854,3 +1854,121 @@ impl StoreMetricAttrs {
         &self.store_size
     }
 }
+
+// Metric attribute keys for the GCS store.
+pub const GCS_BUCKET: &str = "gcs.bucket";
+pub const GCS_CUSTOM_TIME_RESULT: &str = "gcs.custom_time.result";
+
+/// Outcome of one `customTime` refresh decision in the GCS store.
+///
+/// The GCS store stamps `customTime` on an object so that a
+/// `daysSinceCustomTime` lifecycle rule can evict data that no build has used
+/// recently. Every decision produces exactly one of these outcomes, so the four
+/// values partition the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomTimeResult {
+    /// The `customTime` write reached GCS.
+    Written,
+    /// The `customTime` write returned an error.
+    Failed,
+    /// No write was needed. Another process had already refreshed the object,
+    /// or this process had refreshed it inside the interval.
+    SkippedFresh,
+    /// The write was abandoned because the concurrency budget was full.
+    Dropped,
+}
+
+impl From<CustomTimeResult> for Value {
+    fn from(result: CustomTimeResult) -> Self {
+        match result {
+            CustomTimeResult::Written => Self::from("written"),
+            CustomTimeResult::Failed => Self::from("failed"),
+            CustomTimeResult::SkippedFresh => Self::from("skipped_fresh"),
+            CustomTimeResult::Dropped => Self::from("dropped"),
+        }
+    }
+}
+
+/// Pre-allocated attribute combinations for GCS `customTime` metrics.
+#[derive(Debug)]
+pub struct GcsCustomTimeAttrs {
+    written: Vec<KeyValue>,
+    failed: Vec<KeyValue>,
+    skipped_fresh: Vec<KeyValue>,
+    dropped: Vec<KeyValue>,
+}
+
+impl GcsCustomTimeAttrs {
+    /// Creates the attribute sets for one bucket.
+    ///
+    /// A process serves a small fixed number of buckets, so the bucket name is
+    /// a bounded label.
+    #[must_use]
+    pub fn new(bucket: &str) -> Self {
+        let make_attrs = |result: CustomTimeResult| {
+            vec![
+                KeyValue::new(GCS_BUCKET, bucket.to_string()),
+                KeyValue::new(GCS_CUSTOM_TIME_RESULT, result),
+            ]
+        };
+
+        Self {
+            written: make_attrs(CustomTimeResult::Written),
+            failed: make_attrs(CustomTimeResult::Failed),
+            skipped_fresh: make_attrs(CustomTimeResult::SkippedFresh),
+            dropped: make_attrs(CustomTimeResult::Dropped),
+        }
+    }
+
+    #[must_use]
+    pub fn written(&self) -> &[KeyValue] {
+        &self.written
+    }
+    #[must_use]
+    pub fn failed(&self) -> &[KeyValue] {
+        &self.failed
+    }
+    #[must_use]
+    pub fn skipped_fresh(&self) -> &[KeyValue] {
+        &self.skipped_fresh
+    }
+    #[must_use]
+    pub fn dropped(&self) -> &[KeyValue] {
+        &self.dropped
+    }
+}
+
+/// Global GCS store metrics instruments.
+pub static GCS_METRICS: LazyLock<GcsMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    GcsMetrics {
+        custom_time_operations: meter
+            .u64_counter("gcs_custom_time_operations")
+            .with_description("Total customTime refresh decisions by outcome")
+            .with_unit("{operation}")
+            .build(),
+
+        custom_time_duration: meter
+            .f64_histogram("gcs_custom_time_duration")
+            .with_description("Duration of customTime metadata writes in milliseconds")
+            .with_unit("ms")
+            // GCS serializes writes to one object at about one per second, so
+            // a contended object lands in the seconds range. The upper
+            // boundaries must cover the client timeout to make it visible.
+            .with_boundaries(vec![
+                1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 3000.0, 5000.0,
+                10000.0,
+            ])
+            .build(),
+    }
+});
+
+/// `OpenTelemetry` metrics instruments for the GCS store.
+#[derive(Debug)]
+pub struct GcsMetrics {
+    /// Counter of `customTime` refresh decisions by outcome
+    pub custom_time_operations: metrics::Counter<u64>,
+    /// Histogram of `customTime` write durations in milliseconds
+    pub custom_time_duration: metrics::Histogram<f64>,
+}
