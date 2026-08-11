@@ -344,17 +344,24 @@ impl ApiWorkerSchedulerImpl {
 
         // Use capability index to get candidate workers that match STATIC properties
         // (Exact, Unknown) and have the required property keys (Priority, Minimum).
-        // This reduces complexity from O(W × P) to O(P × log(W)) for exact properties.
-        let candidates = self
-            .capability_index
-            .find_matching_workers(platform_properties, full_worker_logging);
-
-        if candidates.is_empty() {
+        // The candidates are a bitmap of worker slots, so this lookup allocates
+        // nothing.
+        let mut candidates = WorkerSlotSet::new();
+        if !self.capability_index.find_matching_slots(
+            platform_properties,
+            full_worker_logging,
+            &mut candidates,
+        ) {
             if full_worker_logging {
                 info!("No workers in capability index match required properties");
             }
             return None;
         }
+        let is_candidate = |worker_id: &WorkerId| -> bool {
+            self.capability_index
+                .slot_of(worker_id)
+                .is_some_and(|slot| candidates.contains(slot))
+        };
 
         // Check function for availability AND dynamic Minimum property verification.
         // The index only does presence checks for Minimum properties since their
@@ -389,13 +396,13 @@ impl ApiWorkerSchedulerImpl {
             // Use rfind to get the least recently used that satisfies the properties.
             WorkerAllocationStrategy::LeastRecentlyUsed => workers_iter
                 .rev()
-                .filter(|(worker_id, _)| candidates.contains(worker_id))
+                .filter(|(worker_id, _)| is_candidate(worker_id))
                 .find(&worker_matches)
                 .map(|(_, w)| w.id.clone()),
 
             // Use find to get the most recently used that satisfies the properties.
             WorkerAllocationStrategy::MostRecentlyUsed => workers_iter
-                .filter(|(worker_id, _)| candidates.contains(worker_id))
+                .filter(|(worker_id, _)| is_candidate(worker_id))
                 .find(&worker_matches)
                 .map(|(_, w)| w.id.clone()),
         };
