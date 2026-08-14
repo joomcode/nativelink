@@ -109,7 +109,7 @@ pub trait GcsOperations: Send + Sync + Debug {
     fn update_object_custom_time(
         &self,
         object_path: &ObjectPath,
-        custom_time_unix_secs: i64,
+        custom_time_unix_secs: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
@@ -233,7 +233,7 @@ impl GcsClient {
         });
 
         let custom_time = obj.custom_time.map(|dt| Timestamp {
-            seconds: dt.unix_timestamp(),
+            seconds: dt.unix_timestamp() as u64,
             nanos: 0,
         });
 
@@ -636,13 +636,10 @@ impl GcsOperations for GcsClient {
     async fn update_object_custom_time(
         &self,
         object_path: &ObjectPath,
-        custom_time_unix_secs: i64,
+        custom_time_unix_secs: u64,
     ) -> Result<(), Error> {
         self.with_connection(|| async {
-            // `customTime` must be a wall-clock instant. A negative Unix
-            // timestamp is nonsensical here, so clamp it to the epoch.
-            let custom_time =
-                UNIX_EPOCH + Duration::from_secs(u64::try_from(custom_time_unix_secs).unwrap_or(0));
+            let custom_time = UNIX_EPOCH + Duration::from_secs(custom_time_unix_secs);
 
             // Only `custom_time` is populated; every other field on `Object`
             // is `skip_serializing_if`-guarded at its default, so the PATCH

@@ -3273,6 +3273,10 @@ async fn batch_matching_does_not_oversubscribe_a_worker() -> Result<(), Error> {
 
     // Queue five actions before any worker joins, so that one batch cycle sees
     // all of them at once.
+    #[allow(
+        clippy::collection_is_never_read,
+        reason = "Holds the client listeners open for the length of the test"
+    )]
     let mut action_listeners = Vec::new();
     for index in 0..ACTION_COUNT {
         action_listeners.push(
@@ -3385,6 +3389,10 @@ async fn batch_matching_reads_past_actions_that_cannot_run() -> Result<(), Error
     );
 
     // The head of the queue asks for more cpu than the worker has.
+    #[allow(
+        clippy::collection_is_never_read,
+        reason = "Holds the client listeners open for the length of the test"
+    )]
     let mut action_listeners = Vec::new();
     for index in 0..UNMATCHABLE_ACTIONS {
         action_listeners.push(

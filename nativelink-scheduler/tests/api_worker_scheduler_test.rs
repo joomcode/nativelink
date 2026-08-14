@@ -216,6 +216,10 @@ async fn available_capacity_counts_free_slots() -> Result<(), Error> {
 #[nativelink_test]
 async fn batch_match_counts_only_the_workers_it_examines() -> Result<(), Error> {
     let scheduler = make_scheduler(WorkerAllocationStrategy::default());
+    #[allow(
+        clippy::collection_is_never_read,
+        reason = "Holds the worker channels open for the length of the test"
+    )]
     let mut receivers = Vec::new();
     for name in ["first", "second", "third"] {
         receivers.push(add_worker(&scheduler, name, PlatformProperties::default(), 1).await?);
@@ -265,6 +269,10 @@ async fn batch_match_reports_a_full_pool_without_a_scan() -> Result<(), Error> {
 #[nativelink_test]
 async fn sequential_match_counts_only_the_workers_it_examines() -> Result<(), Error> {
     let scheduler = make_scheduler(WorkerAllocationStrategy::LeastRecentlyUsed);
+    #[allow(
+        clippy::collection_is_never_read,
+        reason = "Holds the worker channels open for the length of the test"
+    )]
     let mut receivers = Vec::new();
     for name in ["first", "second", "third"] {
         receivers.push(add_worker(&scheduler, name, PlatformProperties::default(), 1).await?);

@@ -87,11 +87,11 @@ pub struct GcsStore<Client: GcsOperations, NowFn> {
     #[metric(
         help = "Minimum seconds between customTime refreshes per object; 0 disables RLU tracking"
     )]
-    custom_time_refresh_interval_s: i64,
+    custom_time_refresh_interval_s: u64,
     /// Tracks the last `customTime` this process stamped per object path, used
     /// to throttle metadata writes on reads. Bounded by
     /// `MAX_CUSTOM_TIME_THROTTLE_ENTRIES`.
-    recently_touched: Mutex<HashMap<String, i64>>,
+    recently_touched: Mutex<HashMap<String, u64>>,
     /// Caps how many `customTime` writes this store has in flight at once, so
     /// that a large `FindMissingBlobs` cannot starve reads and uploads of
     /// connection permits. A touch that cannot get a permit is dropped.
@@ -185,7 +185,7 @@ where
             max_retry_buffer_size,
             max_chunk_size,
             max_concurrent_uploads: max_connections,
-            custom_time_refresh_interval_s: i64::from(spec.custom_time_refresh_interval_s),
+            custom_time_refresh_interval_s: u64::from(spec.custom_time_refresh_interval_s),
             recently_touched: Mutex::new(HashMap::new()),
             touch_semaphore: Arc::new(Semaphore::new(core::cmp::max(
                 1,
@@ -280,11 +280,11 @@ where
     /// second to one object, so that burst is what times out. The deadline is
     /// derived from the object path and a per-process salt, which spreads the
     /// writes across pods while staying stable for a given object.
-    fn refresh_interval_for(&self, path: &str) -> i64 {
+    fn refresh_interval_for(&self, path: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.refresh_jitter_salt.hash(&mut hasher);
         path.hash(&mut hasher);
-        let per_mille = (hasher.finish() % (CUSTOM_TIME_JITTER_PER_MILLE + 1)) as i64;
+        let per_mille = hasher.finish() % (CUSTOM_TIME_JITTER_PER_MILLE + 1);
         self.custom_time_refresh_interval_s.saturating_add(
             self.custom_time_refresh_interval_s
                 .saturating_mul(per_mille)
@@ -294,7 +294,7 @@ where
 
     /// Record that `path` carries `stamped_s` as its `customTime`, so that
     /// later reads in this process skip the staleness check.
-    fn record_touch(&self, path: &str, stamped_s: i64) {
+    fn record_touch(&self, path: &str, stamped_s: u64) {
         let mut recently_touched = self.recently_touched.lock();
         if recently_touched.len() >= MAX_CUSTOM_TIME_THROTTLE_ENTRIES {
             recently_touched.clear();
@@ -311,13 +311,13 @@ where
     fn touch_custom_time_if_stale(
         self: Pin<&Self>,
         object_path: &ObjectPath,
-        remote_custom_time_s: Option<i64>,
+        remote_custom_time_s: Option<u64>,
     ) {
         if self.custom_time_refresh_interval_s == 0 {
             return;
         }
 
-        let now_s = (self.now_fn)().unix_timestamp() as i64;
+        let now_s = (self.now_fn)().unix_timestamp();
         if let Some(last_s) = remote_custom_time_s
             && now_s.saturating_sub(last_s) < self.refresh_interval_for(&object_path.path)
         {
@@ -349,7 +349,7 @@ where
             return;
         }
 
-        let now_s = (self.now_fn)().unix_timestamp() as i64;
+        let now_s = (self.now_fn)().unix_timestamp();
 
         // The throttle check, the budget check and the record must all happen
         // under one lock hold. If they do not, a burst of concurrent reads for

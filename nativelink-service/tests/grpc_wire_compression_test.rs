@@ -147,6 +147,7 @@ fn grpc_spec(port: u16, compression: bool) -> GrpcSpec {
         connections_per_endpoint: 0,
         rpc_timeout_s: 120,
         use_legacy_resource_names: false,
+        load_balanced_channel: false,
         headers: HashMap::new(),
         forward_headers: vec![],
         experimental_read_batching: None,

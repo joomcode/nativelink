@@ -683,7 +683,7 @@ async fn update_sets_custom_time_baseline() -> Result<(), Error> {
     let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 1).await;
     assert_eq!(
         stamps,
-        vec![base_timestamp as i64],
+        vec![base_timestamp],
         "Upload should set a customTime baseline once, stamped with the upload time",
     );
 
@@ -711,7 +711,7 @@ async fn get_part_refreshes_custom_time_throttled() -> Result<(), Error> {
     let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 1).await;
     assert_eq!(
         stamps,
-        vec![base_timestamp as i64],
+        vec![base_timestamp],
         "First read should stamp customTime with the read time",
     );
 
@@ -725,7 +725,7 @@ async fn get_part_refreshes_custom_time_throttled() -> Result<(), Error> {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         custom_time_update_secs(&mock_ops.get_requests().await, &object_path),
-        vec![base_timestamp as i64],
+        vec![base_timestamp],
         "Read within the throttle window should be suppressed",
     );
 
@@ -736,7 +736,7 @@ async fn get_part_refreshes_custom_time_throttled() -> Result<(), Error> {
     let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 2).await;
     assert_eq!(
         stamps,
-        vec![base_timestamp as i64, later as i64],
+        vec![base_timestamp, later],
         "Read after the throttle window should re-stamp customTime with the new read time",
     );
 
@@ -764,7 +764,7 @@ async fn has_refreshes_custom_time_for_present_blob_only() -> Result<(), Error> 
     let stamps = wait_for_custom_time_updates(&mock_ops, &present_path, 1).await;
     assert_eq!(
         stamps,
-        vec![base_timestamp as i64],
+        vec![base_timestamp],
         "Existence check on a present blob should refresh customTime",
     );
 
@@ -795,7 +795,7 @@ async fn has_skips_custom_time_refreshed_by_another_process() -> Result<(), Erro
     let key: StoreKey = to_store_key(DigestInfo::try_new(VALID_HASH1, 5)?);
     let object_path = create_object_path(&key);
     mock_ops
-        .add_object_with_custom_time(&object_path, vec![1, 2, 3, 4, 5], base_timestamp as i64)
+        .add_object_with_custom_time(&object_path, vec![1, 2, 3, 4, 5], base_timestamp)
         .await;
 
     // Well inside the refresh window, whatever jitter this process picked.
@@ -814,7 +814,7 @@ async fn has_skips_custom_time_refreshed_by_another_process() -> Result<(), Erro
     let stamps = wait_for_custom_time_updates(&mock_ops, &object_path, 1).await;
     assert_eq!(
         stamps,
-        vec![later as i64],
+        vec![later],
         "A customTime older than the refresh window must be re-stamped",
     );
 
@@ -1079,7 +1079,7 @@ async fn create_test_store_with_custom_time(
 
 // Count how many `UpdateCustomTime` requests targeted the given object path.
 // Collect, in order, the `customTime` timestamps PATCHed for `object_path`.
-fn custom_time_update_secs(requests: &[MockRequest], object_path: &ObjectPath) -> Vec<i64> {
+fn custom_time_update_secs(requests: &[MockRequest], object_path: &ObjectPath) -> Vec<u64> {
     requests
         .iter()
         .filter_map(|req| match req {
@@ -1099,7 +1099,7 @@ async fn wait_for_custom_time_updates(
     mock_ops: &MockGcsOperations,
     object_path: &ObjectPath,
     expected: usize,
-) -> Vec<i64> {
+) -> Vec<u64> {
     for _ in 0..200 {
         let secs = custom_time_update_secs(&mock_ops.get_requests().await, object_path);
         if secs.len() >= expected {
@@ -1250,7 +1250,7 @@ async fn get_part_ignores_empty_stream_chunks() -> Result<(), Error> {
         async fn update_object_custom_time(
             &self,
             object_path: &ObjectPath,
-            custom_time_unix_secs: i64,
+            custom_time_unix_secs: u64,
         ) -> Result<(), Error> {
             self.0
                 .update_object_custom_time(object_path, custom_time_unix_secs)

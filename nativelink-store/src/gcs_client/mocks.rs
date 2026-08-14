@@ -119,7 +119,7 @@ pub enum MockRequest {
     },
     UpdateCustomTime {
         object_path: ObjectPath,
-        custom_time_unix_secs: i64,
+        custom_time_unix_secs: u64,
     },
 }
 
@@ -302,7 +302,7 @@ impl MockGcsOperations {
         &self,
         path: &ObjectPath,
         content: Vec<u8>,
-        custom_time_unix_secs: i64,
+        custom_time_unix_secs: u64,
     ) {
         self.add_object(path, content).await;
         let object_key = self.get_object_key(path);
@@ -574,7 +574,7 @@ impl GcsOperations for MockGcsOperations {
     async fn update_object_custom_time(
         &self,
         object_path: &ObjectPath,
-        custom_time_unix_secs: i64,
+        custom_time_unix_secs: u64,
     ) -> Result<(), Error> {
         self.call_counts
             .custom_time_update_calls

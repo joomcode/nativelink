@@ -79,6 +79,7 @@ async fn make_verify_store_manager() -> Result<Arc<StoreManager>, Error> {
     store_manager.add_store(
         "main_cas",
         store_factory(
+            "main_cas",
             &StoreSpec::Verify(Box::new(VerifySpec {
                 verify_size: true,
                 verify_hash: true,
