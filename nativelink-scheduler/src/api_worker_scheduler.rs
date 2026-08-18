@@ -1103,8 +1103,11 @@ impl ApiWorkerScheduler {
         self.metrics
             .find_worker_time_ns
             .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
-        self.worker_scheduler_metrics
-            .record_find_worker(WorkerFindMode::Sequential, &pass, elapsed);
+        self.worker_scheduler_metrics.record_find_worker(
+            WorkerFindMode::Sequential,
+            &pass,
+            elapsed,
+        );
         result
     }
 
@@ -1147,9 +1150,10 @@ impl ApiWorkerScheduler {
             .fetch_add(pass.hits, Ordering::Relaxed);
         // The legacy counters have no bucket for a full pool, so the actions
         // that the pool pushed back count as misses.
-        self.metrics
-            .find_worker_misses
-            .fetch_add(pass.misses.saturating_add(pass.no_capacity), Ordering::Relaxed);
+        self.metrics.find_worker_misses.fetch_add(
+            pass.misses.saturating_add(pass.no_capacity),
+            Ordering::Relaxed,
+        );
 
         let elapsed = start.elapsed();
         #[allow(clippy::cast_possible_truncation)]

@@ -712,8 +712,11 @@ where
 
         // A failed attempt that re-queued the action counts as a retry.
         if is_retry {
-            let retry_attrs =
-                nativelink_util::metrics::make_execution_attributes(instance_name, identity, priority);
+            let retry_attrs = nativelink_util::metrics::make_execution_attributes(
+                instance_name,
+                identity,
+                priority,
+            );
             EXECUTION_METRICS.execution_retry_count.add(1, &retry_attrs);
         }
 

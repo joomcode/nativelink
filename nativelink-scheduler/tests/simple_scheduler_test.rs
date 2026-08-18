@@ -3227,7 +3227,6 @@ async fn failed_final_update_does_not_leak_worker_capacity() -> Result<(), Error
     Ok(())
 }
 
-
 /// Adds a worker that accepts at most `max_inflight_tasks` actions at a time.
 async fn setup_new_worker_with_task_limit(
     scheduler: &SimpleScheduler,
