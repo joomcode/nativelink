@@ -1,0 +1,71 @@
+// Scheduler server. Clients use 127.0.0.1:50052, workers use 127.0.0.1:50061.
+// The CAS is remote, so this process reaches it through a gRPC store.
+{
+  stores: [
+    {
+      name: "GRPC_CAS_STORE",
+      grpc: {
+        instance_name: "",
+        endpoints: [
+          {
+            address: "grpc://127.0.0.1:50051",
+          },
+        ],
+        store_type: "cas",
+        experimental_remote_cache_compression: true,
+      },
+    },
+  ],
+  schedulers: [
+    {
+      name: "MAIN_SCHEDULER",
+      simple: {
+        supported_platform_properties: {
+          cpu_count: "minimum",
+          OSFamily: "priority",
+          "container-image": "priority",
+        },
+      },
+    },
+  ],
+  servers: [
+    {
+      name: "scheduler",
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50052",
+        },
+      },
+      services: {
+        execution: [
+          {
+            cas_store: "GRPC_CAS_STORE",
+            scheduler: "MAIN_SCHEDULER",
+          },
+        ],
+        capabilities: [
+          {
+            remote_execution: {
+              scheduler: "MAIN_SCHEDULER",
+            },
+          },
+        ],
+      },
+    },
+    {
+      // Workers talk to this port, clients never do.
+      name: "worker_api",
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50061",
+        },
+      },
+      services: {
+        worker_api: {
+          scheduler: "MAIN_SCHEDULER",
+        },
+        health: {},
+      },
+    },
+  ],
+}

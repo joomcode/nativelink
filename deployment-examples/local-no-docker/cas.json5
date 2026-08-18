@@ -1,0 +1,66 @@
+// CAS + AC server. Listens on 127.0.0.1:50051.
+// Data goes to /tmp/nativelink-local. Delete that directory to reset.
+{
+  stores: [
+    {
+      name: "CAS_MAIN_STORE",
+      filesystem: {
+        content_path: "/tmp/nativelink-local/cas/content",
+        temp_path: "/tmp/nativelink-local/cas/tmp",
+        eviction_policy: {
+          // 10gb.
+          max_bytes: 10000000000,
+        },
+      },
+    },
+    {
+      name: "AC_MAIN_STORE",
+      filesystem: {
+        content_path: "/tmp/nativelink-local/ac/content",
+        temp_path: "/tmp/nativelink-local/ac/tmp",
+        eviction_policy: {
+          // 500mb.
+          max_bytes: 500000000,
+        },
+      },
+    },
+  ],
+  servers: [
+    {
+      name: "cas_ac",
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50051",
+        },
+      },
+      services: {
+        cas: [
+          {
+            cas_store: "CAS_MAIN_STORE",
+          },
+        ],
+        ac: [
+          {
+            ac_store: "AC_MAIN_STORE",
+          },
+        ],
+        bytestream: [
+          {
+            cas_store: "CAS_MAIN_STORE",
+          },
+        ],
+        capabilities: [
+          {
+            // Advertise zstd wire compression. The CAS and ByteStream
+            // services then accept REAPI compressed-blobs/zstd data.
+            remote_cache_compression: true,
+          },
+        ],
+        health: {},
+      },
+    },
+  ],
+  global: {
+    max_open_files: 24576,
+  },
+}
