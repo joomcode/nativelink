@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_lock::Mutex;
+use bytes::Bytes;
 use futures::stream::unfold;
 use futures::{Stream, StreamExt};
 use nativelink_config::stores::{GrpcEndpoint, GrpcSpec, Retry, StoreType};
@@ -16,7 +17,7 @@ use nativelink_proto::build::bazel::remote::execution::v2::{
     BatchReadBlobsRequest, BatchReadBlobsResponse, BatchUpdateBlobsRequest,
     BatchUpdateBlobsResponse, Digest, FindMissingBlobsRequest, FindMissingBlobsResponse,
     GetTreeRequest, GetTreeResponse, SpliceBlobRequest, SpliceBlobResponse, SplitBlobRequest,
-    SplitBlobResponse, chunking_function, digest_function,
+    SplitBlobResponse, chunking_function, compressor, digest_function,
 };
 use nativelink_proto::google::bytestream::byte_stream_server::{ByteStream, ByteStreamServer};
 use nativelink_proto::google::bytestream::{
@@ -29,6 +30,7 @@ use nativelink_util::buf_channel::make_buf_channel_pair;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::store_trait::{StoreLike, UploadSizeInfo};
 use nativelink_util::telemetry::ClientHeaders;
+use nativelink_util::wire_compression::compress;
 use opentelemetry::Context;
 use regex::Regex;
 use tokio::time::timeout;
@@ -471,5 +473,156 @@ async fn split_and_splice_blob_forward_to_backend() -> Result<(), Error> {
         assert_eq!(splice_requests.len(), 1);
         assert_eq!(splice_requests[0].instance_name, "backend_instance");
     }
+    Ok(())
+}
+
+/// How the fake CAS breaks a `compressed-blobs/zstd` read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompressedReadFault {
+    /// The read never starts: the RPC itself fails.
+    FailToStart,
+    /// The read starts, delivers one decodable frame, then the connection
+    /// dies. This is what a CAS pod restart looks like to a worker.
+    InterruptAfterFirstFrame,
+}
+
+#[derive(Debug, Clone)]
+struct FaultyCompressedServer {
+    fault: CompressedReadFault,
+    /// A complete zstd frame that decodes to the first half of the payload.
+    first_frame: Bytes,
+    payload: Bytes,
+    identity_reads: Arc<Mutex<Vec<ReadRequest>>>,
+}
+
+#[tonic::async_trait]
+impl ByteStream for FaultyCompressedServer {
+    type ReadStream = ReadStream;
+
+    async fn read(
+        &self,
+        grpc_request: Request<ReadRequest>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        let request = grpc_request.into_inner();
+        if !request.resource_name.contains("compressed-blobs/zstd") {
+            self.identity_reads.lock().await.push(request);
+            return Ok(Response::new(Box::pin(unfold(
+                Some(self.payload.clone()),
+                async move |payload| {
+                    let payload = payload?;
+                    Some((Ok(ReadResponse { data: payload }), None))
+                },
+            ))));
+        }
+
+        if self.fault == CompressedReadFault::FailToStart {
+            return Err(Status::unavailable("cas is restarting"));
+        }
+
+        Ok(Response::new(Box::pin(unfold(
+            (0u8, self.first_frame.clone()),
+            async move |(step, frame)| match step {
+                0 => Some((
+                    Ok(ReadResponse {
+                        data: frame.clone(),
+                    }),
+                    (1, frame),
+                )),
+                1 => {
+                    // Let the frame decode and reach the caller before the
+                    // stream dies, so the read really is interrupted after
+                    // partial delivery.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    Some((Err(Status::unavailable("connection reset")), (2, frame)))
+                }
+                _ => None,
+            },
+        ))))
+    }
+
+    #[allow(clippy::unimplemented)]
+    async fn write(
+        &self,
+        _grpc_request: Request<Streaming<WriteRequest>>,
+    ) -> Result<Response<WriteResponse>, Status> {
+        unimplemented!();
+    }
+
+    #[allow(clippy::unimplemented)]
+    async fn query_write_status(
+        &self,
+        _grpc_request: Request<QueryWriteStatusRequest>,
+    ) -> Result<Response<QueryWriteStatusResponse>, Status> {
+        unimplemented!();
+    }
+}
+
+async fn make_faulty_compressed_store(
+    fault: CompressedReadFault,
+) -> Result<(FaultyCompressedServer, Arc<GrpcStore>, DigestInfo, Bytes), Error> {
+    // Must be at least WIRE_COMPRESSION_MIN_SIZE_BYTES for the store to take
+    // the compressed path at all.
+    let payload = Bytes::from(vec![b'a'; 128 * 1024]);
+    let first_frame = compress(payload.slice(..payload.len() / 2), compressor::Value::Zstd)?;
+    let fake_server = FaultyCompressedServer {
+        fault,
+        first_frame,
+        payload: payload.clone(),
+        identity_reads: Arc::new(Mutex::new(vec![])),
+    };
+
+    let listener = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let service = ByteStreamServer::new(fake_server.clone());
+    background_spawn!("faulty_compressed_server", async move {
+        Server::builder()
+            .add_service(service)
+            .serve_with_incoming(listener)
+            .await
+            .unwrap();
+    });
+
+    let mut spec = test_spec(format!("http://localhost:{port}"), false);
+    spec.experimental_remote_cache_compression = Some(true);
+    spec.rpc_timeout_s = 0;
+    let store = GrpcStore::new(&spec).await?;
+    let digest = DigestInfo::try_new(VALID_HASH, payload.len()).unwrap();
+    Ok((fake_server, store, digest, payload))
+}
+
+#[nativelink_test]
+async fn compressed_read_interrupted_after_partial_delivery_fails() -> Result<(), Error> {
+    let (server, store, digest, _payload) =
+        make_faulty_compressed_store(CompressedReadFault::InterruptAfterFirstFrame).await?;
+
+    let result = store.get_part_unchunked(digest, 0, None).await;
+
+    assert!(
+        result.is_err(),
+        "A compressed read that died after delivering data must fail, not \
+         resume: the delivered byte count is not exact, so an identity read \
+         from that offset splices a hole into the blob"
+    );
+    assert!(
+        server.identity_reads.lock().await.is_empty(),
+        "No identity read must be stitched onto the partial compressed read"
+    );
+    Ok(())
+}
+
+#[nativelink_test]
+async fn compressed_read_that_never_starts_falls_back_to_identity() -> Result<(), Error> {
+    let (server, store, digest, payload) =
+        make_faulty_compressed_store(CompressedReadFault::FailToStart).await?;
+
+    let data = store.get_part_unchunked(digest, 0, None).await?;
+
+    assert_eq!(data, payload, "The identity fallback must return the blob");
+    let identity_reads = server.identity_reads.lock().await;
+    assert_eq!(identity_reads.len(), 1);
+    assert_eq!(
+        identity_reads[0].read_offset, 0,
+        "Nothing was delivered, so the fallback must read the whole blob"
+    );
     Ok(())
 }

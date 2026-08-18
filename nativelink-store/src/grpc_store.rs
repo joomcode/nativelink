@@ -1275,16 +1275,17 @@ impl GrpcStore {
 
     /// Reads all of `digest` as a REAPI `compressed-blobs/zstd` read,
     /// streaming decode into `writer` with size and digest verification at
-    /// EOF. Returns `Ok(None)` on success. On a retryable transport failure
-    /// it returns `Ok(Some(n))` where `n` is the count of decoded bytes
-    /// already forwarded, so the caller can resume via the identity path at
-    /// uncompressed offset `n`. Terminal errors (including decode/digest
-    /// mismatches) propagate as `Err`.
+    /// EOF. Returns `Ok(true)` when the blob was fully served. Returns
+    /// `Ok(false)` when a retryable transport failure hit before any byte
+    /// reached `writer`, so the caller can read the whole blob again via
+    /// the identity path. Terminal errors (including decode/digest
+    /// mismatches) and interruptions after partial delivery propagate as
+    /// `Err`.
     async fn get_part_compressed(
         self: Pin<&Self>,
         digest: DigestInfo,
         writer: &mut DropCloserWriteHalf,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<bool, Error> {
         #[derive(Debug)]
         enum CompressedReadStage {
             Feed,
@@ -1329,7 +1330,7 @@ impl GrpcStore {
                     ?err,
                     "Compressed read failed to start, falling back to identity read"
                 );
-                return Ok(Some(0));
+                return Ok(false);
             }
             Err(err) => return Err(err.append("in GrpcStore::get_part_compressed()")),
         };
@@ -1413,7 +1414,7 @@ impl GrpcStore {
         );
 
         match result {
-            Ok(((), (), ())) => Ok(None),
+            Ok(((), (), ())) => Ok(true),
             Err((CompressedReadStage::Decode, err)) if err.code == Code::InvalidArgument => {
                 Err(err.append("in GrpcStore::get_part_compressed()"))
             }
@@ -1422,13 +1423,30 @@ impl GrpcStore {
                 Err(err.append("in GrpcStore::get_part_compressed()"))
             }
             Err((stage, err)) => {
+                let forwarded = forwarded.load(Ordering::Relaxed);
+                if forwarded != 0 {
+                    // Decoded bytes already went to `writer` and the exact
+                    // count is not knowable: `try_join!` cancels the pump
+                    // while it awaits `send`, so the last chunk can be
+                    // counted here but never delivered. Resuming an
+                    // identity read at this offset splices a hole into the
+                    // blob, and no layer below re-checks the digest of a
+                    // stitched read, so the corruption reaches the caller
+                    // and its local cache. Fail the read instead.
+                    warn!(
+                        ?stage,
+                        ?err,
+                        forwarded,
+                        "Compressed read interrupted after partial delivery, failing the read"
+                    );
+                    return Err(err.append("in GrpcStore::get_part_compressed()"));
+                }
                 debug!(?stage, ?err, "Compressed read interrupted");
                 warn!(
                     ?err,
-                    forwarded = forwarded.load(Ordering::Relaxed),
-                    "Compressed read interrupted, falling back to identity read"
+                    "Compressed read interrupted before delivery, falling back to identity read"
                 );
-                Ok(Some(forwarded.load(Ordering::Relaxed)))
+                Ok(false)
             }
         }
     }
@@ -1679,19 +1697,14 @@ impl StoreDriver for GrpcStore {
             }
         }
 
-        let mut offset = offset;
         if self.remote_cache_compression_enabled
             && is_digest_key
             && offset == 0
             && length.is_none_or(|len| len >= digest.size_bytes())
             && digest.size_bytes() >= WIRE_COMPRESSION_MIN_SIZE_BYTES
+            && self.get_part_compressed(digest, writer).await?
         {
-            match self.get_part_compressed(digest, writer).await? {
-                None => return Ok(()),
-                // Resume via the identity path from where the compressed
-                // read left off.
-                Some(forwarded) => offset = forwarded,
-            }
+            return Ok(());
         }
 
         let resource_name = if self.use_legacy_resource_names {
