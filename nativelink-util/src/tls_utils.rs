@@ -121,17 +121,64 @@ pub fn endpoint_from(
     Ok(endpoint_transport)
 }
 
+/// The subset of endpoint configuration that ginepro's `LoadBalancedChannel`
+/// can express.
+///
+/// ginepro does not reuse the `tonic::transport::Endpoint` we build in
+/// [`endpoint`]; it constructs its own from a host and port. Anything not
+/// carried across here is silently lost. In particular ginepro has **no
+/// keepalive setter**, so a load-balanced store cannot detect a half-open
+/// connection at the transport layer, and `GrpcSpec::rpc_timeout_s` is its only
+/// liveness backstop.
+#[derive(Clone, Debug, Default)]
+pub struct LoadBalancedOptions {
+    /// Connection timeout applied to every `Endpoint` ginepro creates.
+    pub connect_timeout: Duration,
+    /// Per-request timeout applied to every `Endpoint` ginepro creates.
+    /// Zero leaves it unset.
+    pub request_timeout: Duration,
+    /// TLS must be handed over explicitly. Without it a `grpcs://` endpoint
+    /// silently connects in plaintext.
+    pub tls_config: Option<tonic::transport::ClientTlsConfig>,
+}
+
+/// Build the ginepro settings for `endpoint_config`, used when the store sets
+/// `load_balanced_channel: true`. `rpc_timeout` comes from
+/// `GrpcSpec::rpc_timeout_s`.
+pub fn load_balanced_options(
+    endpoint_config: &GrpcEndpoint,
+    rpc_timeout: Duration,
+) -> Result<LoadBalancedOptions, Error> {
+    if rpc_timeout.is_zero() {
+        warn!(
+            address = %endpoint_config.address,
+            "load_balanced_channel is enabled with rpc_timeout_s=0. ginepro cannot \
+             configure HTTP/2 or TCP keepalive, so a stalled connection is never \
+             detected and its concurrency permit is held forever. Set rpc_timeout_s.",
+        );
+    }
+    Ok(LoadBalancedOptions {
+        connect_timeout: connect_timeout(endpoint_config),
+        request_timeout: rpc_timeout,
+        tls_config: load_client_config(&endpoint_config.tls_config)?,
+    })
+}
+
+const fn connect_timeout(endpoint_config: &GrpcEndpoint) -> Duration {
+    if endpoint_config.connect_timeout_s > 0 {
+        Duration::from_secs(endpoint_config.connect_timeout_s)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
 pub fn endpoint(endpoint_config: &GrpcEndpoint) -> Result<tonic::transport::Endpoint, Error> {
     let endpoint = endpoint_from(
         &endpoint_config.address,
         load_client_config(&endpoint_config.tls_config)?,
     )?;
 
-    let connect_timeout = if endpoint_config.connect_timeout_s > 0 {
-        Duration::from_secs(endpoint_config.connect_timeout_s)
-    } else {
-        Duration::from_secs(30)
-    };
+    let connect_timeout = connect_timeout(endpoint_config);
     let tcp_keepalive = if endpoint_config.tcp_keepalive_s > 0 {
         Duration::from_secs(endpoint_config.tcp_keepalive_s)
     } else {

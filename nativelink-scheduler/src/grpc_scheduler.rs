@@ -103,6 +103,18 @@ impl GrpcScheduler {
         jitter_fn: Arc<dyn Fn(Duration) -> Duration + Send + Sync>,
     ) -> Result<Self, Error> {
         let endpoint = tls_utils::endpoint(&spec.endpoint)?;
+        // ginepro ignores the Endpoint above and builds its own, so the
+        // settings it can honour have to be carried across explicitly.
+        let balanced_options = if spec.load_balanced_channel {
+            // schedulers::GrpcSpec has no rpc_timeout_s, so this path has no
+            // per-RPC bound at all. load_balanced_options warns about it.
+            Some(tls_utils::load_balanced_options(
+                &spec.endpoint,
+                Duration::ZERO,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             supported_props: Mutex::new(HashMap::new()),
             retrier: Retrier::new(
@@ -111,12 +123,11 @@ impl GrpcScheduler {
                 spec.retry.clone(),
             ),
             connection_manager: ConnectionManager::new(
-                core::iter::once(endpoint),
+                core::iter::once((endpoint, balanced_options)),
                 spec.connections_per_endpoint,
                 spec.max_concurrent_requests,
                 spec.retry.clone(),
                 jitter_fn,
-                spec.load_balanced_channel,
             ),
         })
     }
