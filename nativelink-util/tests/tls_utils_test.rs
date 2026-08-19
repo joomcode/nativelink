@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nativelink_config::stores::ClientTlsConfig;
+use core::time::Duration;
+
+use nativelink_config::stores::{ClientTlsConfig, GrpcEndpoint};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
-use nativelink_util::tls_utils::{endpoint_from, load_client_config};
+use nativelink_util::tls_utils::{endpoint_from, load_balanced_options, load_client_config};
 use tempfile::NamedTempFile;
 
 #[nativelink_test]
@@ -183,5 +185,46 @@ async fn test_endpoint_from_missing_authority() -> Result<(), Error> {
         result,
         Err(e) if e.to_string().contains("Unable to determine authority of endpoint")
     ));
+    Ok(())
+}
+
+fn grpc_endpoint(connect_timeout_s: u64) -> GrpcEndpoint {
+    GrpcEndpoint {
+        address: "grpc://example.com:50051".to_string(),
+        tls_config: None,
+        concurrency_limit: None,
+        connect_timeout_s,
+        tcp_keepalive_s: 0,
+        http2_keepalive_interval_s: 0,
+        http2_keepalive_timeout_s: 0,
+    }
+}
+
+/// ginepro builds its own `Endpoint`s, so anything `load_balanced_options` does
+/// not carry across is silently lost on `load_balanced_channel: true` stores.
+/// That is how a stalled connection once went undetected until a pod restart.
+#[nativelink_test]
+async fn test_load_balanced_options_carry_endpoint_configuration() -> Result<(), Error> {
+    let options = load_balanced_options(&grpc_endpoint(7), Duration::from_mins(1))?;
+
+    assert_eq!(
+        options.connect_timeout,
+        Duration::from_secs(7),
+        "connect_timeout_s must reach ginepro"
+    );
+    assert_eq!(
+        options.request_timeout,
+        Duration::from_mins(1),
+        "rpc_timeout_s must reach ginepro; it is the only liveness backstop there"
+    );
+    Ok(())
+}
+
+#[nativelink_test]
+async fn test_load_balanced_options_default_connect_timeout() -> Result<(), Error> {
+    let options = load_balanced_options(&grpc_endpoint(0), Duration::ZERO)?;
+
+    assert_eq!(options.connect_timeout, Duration::from_secs(30));
+    assert_eq!(options.request_timeout, Duration::ZERO);
     Ok(())
 }
