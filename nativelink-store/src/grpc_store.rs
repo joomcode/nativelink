@@ -229,16 +229,26 @@ impl GrpcStore {
             spec.endpoints.is_empty(),
             "Expected at least 1 endpoint in GrpcStore"
         );
+        let rpc_timeout = Duration::from_secs(spec.rpc_timeout_s);
+
         let mut endpoints = Vec::with_capacity(spec.endpoints.len());
         for endpoint_config in &spec.endpoints {
             let endpoint = tls_utils::endpoint(endpoint_config).map_err(|e| {
                 Error::from_std_err(Code::InvalidArgument, &e)
                     .append("Invalid URI for GrpcStore endpoint")
             })?;
-            endpoints.push(endpoint);
+            // ginepro ignores the Endpoint above and builds its own, so the
+            // settings it can honour have to be carried across explicitly.
+            let balanced_options = if spec.load_balanced_channel {
+                Some(tls_utils::load_balanced_options(
+                    endpoint_config,
+                    rpc_timeout,
+                )?)
+            } else {
+                None
+            };
+            endpoints.push((endpoint, balanced_options));
         }
-
-        let rpc_timeout = Duration::from_secs(spec.rpc_timeout_s);
 
         let read_batcher = match &spec.experimental_read_batching {
             Some(config) => {
@@ -288,7 +298,6 @@ impl GrpcStore {
                 spec.max_concurrent_requests,
                 spec.retry.clone(),
                 jitter_fn,
-                spec.load_balanced_channel,
             ),
             rpc_timeout,
             use_legacy_resource_names: spec.use_legacy_resource_names,

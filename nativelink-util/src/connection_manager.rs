@@ -20,15 +20,16 @@ use std::sync::Arc;
 
 use futures::Future;
 use futures::stream::{FuturesUnordered, StreamExt, unfold};
-use ginepro::LoadBalancedChannel;
+use ginepro::{LoadBalancedChannel, ResolutionStrategy};
 use nativelink_config::stores::Retry;
-use nativelink_error::{Code, Error, ResultExt, make_err};
+use nativelink_error::{Code, Error, make_err};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tonic::transport::{Channel, Endpoint, channel};
 use tracing::{debug, error, info, warn};
 
 use crate::background_spawn;
 use crate::retry::{self, Retrier, RetryResult};
+use crate::tls_utils::LoadBalancedOptions;
 
 /// A helper utility that enables management of a suite of connections to an
 /// upstream gRPC endpoint using Tonic.
@@ -91,9 +92,10 @@ struct EstablishedChannel {
 /// handles reconnecting to endpoints on errors and multiple connections to a
 /// given endpoint.
 struct ConnectionManagerWorker {
-    /// The endpoints to establish Channels and the identifier of the last
-    /// connection attempt to that endpoint.
-    endpoints: Vec<(ConnectionIndex, Endpoint)>,
+    /// The endpoints to establish Channels, the identifier of the last
+    /// connection attempt to that endpoint, and the ginepro settings to use if
+    /// the store enabled load balancing for it.
+    endpoints: Vec<(ConnectionIndex, Endpoint, Option<LoadBalancedOptions>)>,
     /// The channel used to communicate between a Connection and the worker.
     connection_tx: mpsc::UnboundedSender<ConnectionRequest>,
     /// Gates the maximum number of in-flight `Connection` objects.
@@ -112,8 +114,6 @@ struct ConnectionManagerWorker {
     /// The retry configuration for connecting to an Endpoint, on failure will
     /// restart the retrier after a 1 second delay.
     retrier: Retrier,
-
-    balanced_channel: bool,
 }
 
 /// The maximum number of queued requests to obtain a connection from the
@@ -126,12 +126,11 @@ impl ConnectionManager {
     /// set of Endpoints.  This will restrict the number of concurrent requests
     /// and automatically re-connect upon transport error.
     pub fn new(
-        endpoints: impl IntoIterator<Item = Endpoint>,
+        endpoints: impl IntoIterator<Item = (Endpoint, Option<LoadBalancedOptions>)>,
         mut connections_per_endpoint: usize,
         mut max_concurrent_requests: usize,
         retry: Retry,
         jitter_fn: retry::JitterFn,
-        balanced_channel: bool,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(WORKER_BACKLOG);
         // The connection messages always come from sync contexts (e.g. drop)
@@ -141,7 +140,7 @@ impl ConnectionManager {
         let (connection_tx, connection_rx) = mpsc::unbounded_channel();
         let endpoints = endpoints
             .into_iter()
-            .map(|endpoint| (0, endpoint))
+            .map(|(endpoint, balanced_options)| (0, endpoint, balanced_options))
             .collect();
 
         if max_concurrent_requests == 0 {
@@ -164,7 +163,6 @@ impl ConnectionManager {
                 jitter_fn,
                 retry,
             ),
-            balanced_channel,
         };
         background_spawn!("connection_manager_worker_spawn", async move {
             worker
@@ -259,7 +257,8 @@ impl ConnectionManagerWorker {
     }
 
     fn connect_endpoint(&mut self, endpoint_index: usize, connection_index: Option<usize>) {
-        let Some((current_connection_index, endpoint)) = self.endpoints.get_mut(endpoint_index)
+        let Some((current_connection_index, endpoint, balanced_options)) =
+            self.endpoints.get_mut(endpoint_index)
         else {
             // Unknown endpoint, this should never happen.
             error!(?endpoint_index, "Connection to unknown endpoint requested");
@@ -287,12 +286,14 @@ impl ConnectionManagerWorker {
             endpoint_index,
             connection_index,
         };
-        let balanced_channel = self.balanced_channel;
-        let connection_stream = unfold(endpoint.clone(), move |endpoint| async move {
-            if balanced_channel {
-                Self::load_balanced_channel(endpoint).await
-            } else {
-                Self::channel(endpoint).await
+        let balanced_options = balanced_options.clone();
+        let connection_stream = unfold(endpoint.clone(), move |endpoint| {
+            let balanced_options = balanced_options.clone();
+            async move {
+                match balanced_options {
+                    Some(options) => Self::load_balanced_channel(endpoint, &options).await,
+                    None => Self::channel(endpoint).await,
+                }
             }
         });
         let retrier = self.retrier.clone();
@@ -331,28 +332,64 @@ impl ConnectionManagerWorker {
         ))
     }
 
-    async fn load_balanced_channel(endpoint: Endpoint) -> Option<(RetryResult<Channel>, Endpoint)> {
-        let uri = endpoint.uri();
-        let host = uri
-            .host()
-            .err_tip(|| format!("Unable to get host from endpoint {uri}"))
-            .unwrap();
-        let port = uri
-            .port()
-            .err_tip(|| format!("Unable to get port from endpoint {uri}"))
-            .unwrap()
-            .as_u16();
+    /// Build a ginepro `LoadBalancedChannel` for `endpoint`.
+    ///
+    /// ginepro constructs its own `Endpoint`s internally, so every setting we
+    /// applied in `tls_utils::endpoint` is lost unless it is re-applied here
+    /// from `options`. ginepro has no keepalive setter at all, so this path
+    /// relies on `options.request_timeout` (`GrpcSpec::rpc_timeout_s`) to bound
+    /// a stalled connection; without it a stalled RPC holds its concurrency
+    /// permit forever and the store deadlocks.
+    async fn load_balanced_channel(
+        endpoint: Endpoint,
+        options: &LoadBalancedOptions,
+    ) -> Option<(RetryResult<Channel>, Endpoint)> {
+        let uri = endpoint.uri().clone();
+        let Some(host) = uri.host().map(ToString::to_string) else {
+            return Some((
+                RetryResult::Err(make_err!(
+                    Code::InvalidArgument,
+                    "Unable to get host from endpoint {uri}"
+                )),
+                endpoint,
+            ));
+        };
+        let Some(port) = uri.port().map(|port| port.as_u16()) else {
+            return Some((
+                RetryResult::Err(make_err!(
+                    Code::InvalidArgument,
+                    "Unable to get port from endpoint {uri}"
+                )),
+                endpoint,
+            ));
+        };
 
-        let result = LoadBalancedChannel::builder((host.to_string(), port))
+        // `LoadBalancedOptions::default()` leaves this zero; an Eager resolve
+        // with a zero timeout would fail instantly.
+        let connect_timeout = if options.connect_timeout.is_zero() {
+            Duration::from_secs(30)
+        } else {
+            options.connect_timeout
+        };
+        let mut builder = LoadBalancedChannel::builder((host, port))
+            .connect_timeout(connect_timeout)
+            // Lazy resolution hands back a channel before any address is known,
+            // so requests queue against a backend-less channel. Resolve first
+            // and let the retrier handle a DNS failure instead.
+            .resolution_strategy(ResolutionStrategy::Eager {
+                timeout: connect_timeout,
+            });
+        if !options.request_timeout.is_zero() {
+            builder = builder.timeout(options.request_timeout);
+        }
+        if let Some(tls_config) = options.tls_config.clone() {
+            builder = builder.with_tls(tls_config);
+        }
+
+        let result = builder
             .channel()
             .await
-            .map_err(|err| {
-                make_err!(
-                    Code::Unavailable,
-                    "Failed to connect to {:?}: {err:?}",
-                    endpoint.uri()
-                )
-            });
+            .map_err(|err| make_err!(Code::Unavailable, "Failed to connect to {uri:?}: {err:?}"));
 
         Some((
             result

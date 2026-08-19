@@ -39,6 +39,7 @@ use nativelink_proto::google::bytestream::{
 };
 use nativelink_util::background_spawn;
 use nativelink_util::connection_manager::ConnectionManager;
+use nativelink_util::tls_utils::LoadBalancedOptions;
 use pretty_assertions::assert_eq;
 use tokio::time::timeout;
 use tokio_stream::Stream;
@@ -103,12 +104,11 @@ async fn permits_released_on_drop_no_leak() -> Result<(), Error> {
 
     let endpoint = fake_grpc_server_endpoint().await;
     let cm = ConnectionManager::new(
-        vec![endpoint],
+        vec![(endpoint, None)],
         /* connections_per_endpoint = */ MAX_CONCURRENT,
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
-        /* balanced_channel = */ false,
     );
 
     for i in 0..ITERATIONS {
@@ -131,12 +131,11 @@ async fn aborted_caller_future_does_not_leak_permits() -> Result<(), Error> {
 
     let endpoint = fake_grpc_server_endpoint().await;
     let cm = Arc::new(ConnectionManager::new(
-        vec![endpoint],
+        vec![(endpoint, None)],
         /* connections_per_endpoint = */ MAX_CONCURRENT,
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
-        /* balanced_channel = */ false,
     ));
 
     let mut handles = Vec::new();
@@ -172,12 +171,11 @@ async fn unbalanced_channel_establishes_connection() -> Result<(), Error> {
 
     let endpoint = fake_grpc_server_endpoint().await;
     let cm = ConnectionManager::new(
-        vec![endpoint],
+        vec![(endpoint, None)],
         MAX_CONCURRENT,
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
-        /* balanced_channel = */ false,
     );
 
     // With `balanced_channel = false` the worker uses the direct
@@ -205,15 +203,20 @@ async fn balanced_channel_establishes_connection() -> Result<(), Error> {
 
     let endpoint = fake_grpc_server_endpoint().await;
     let cm = ConnectionManager::new(
-        vec![endpoint],
+        vec![(
+            endpoint,
+            Some(LoadBalancedOptions {
+                connect_timeout: Duration::from_secs(30),
+                ..Default::default()
+            }),
+        )],
         MAX_CONCURRENT,
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
-        /* balanced_channel = */ true,
     );
 
-    // With `balanced_channel = true` the worker uses the ginepro
+    // With load-balancing options present the worker uses the ginepro
     // `LoadBalancedChannel` path; acquiring a connection within the timeout
     // proves that branch resolves the endpoint and produces a usable channel.
     let conn = timeout(Duration::from_secs(5), cm.connection("balanced".into()))
@@ -229,12 +232,11 @@ async fn extra_request_above_max_blocks_until_a_release() -> Result<(), Error> {
 
     let endpoint = fake_grpc_server_endpoint().await;
     let cm = Arc::new(ConnectionManager::new(
-        vec![endpoint],
+        vec![(endpoint, None)],
         MAX_CONCURRENT + 1,
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
-        /* balanced_channel = */ false,
     ));
 
     let c1 = cm.connection("hold-1".into()).await?;
