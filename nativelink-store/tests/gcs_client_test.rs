@@ -628,3 +628,127 @@ async fn test_gcs_client_error_mapping() -> Result<(), Error> {
 
     Ok(())
 }
+
+/// Regression test for a deadlock in the resumable-upload path.
+///
+/// `try_resumable_upload` runs inside `with_connection`, which holds one permit
+/// of the client's `multipart_max_concurrent_uploads` semaphore for the whole
+/// upload. It used to call `read_object_metadata` from inside that closure to
+/// verify the object landed, and `read_object_metadata` acquires the *same*
+/// semaphore. With N concurrent uploads above `SIMPLE_UPLOAD_THRESHOLD` and a
+/// semaphore of N, every task held a permit while waiting for a second one that
+/// only another holder could release. `Semaphore::acquire` has no timeout, so
+/// the client wedged permanently: zero throughput, zero CPU, no errors, and no
+/// recovery short of a restart.
+///
+/// Drives exactly `MAX_CONCURRENT` uploads through a semaphore of the same size.
+/// Before the fix this hangs forever; the timeout is what makes it a test.
+#[nativelink_test]
+async fn test_resumable_upload_does_not_deadlock_on_permit_reentry() -> Result<(), Error> {
+    use core::time::Duration;
+
+    use nativelink_config::stores::{CommonObjectSpec, ExperimentalGcsSpec};
+    use nativelink_store::gcs_client::client::GcsClient;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const MAX_CONCURRENT: usize = 4;
+    // Must exceed SIMPLE_UPLOAD_THRESHOLD (10MiB) to take the resumable path.
+    const UPLOAD_SIZE: usize = 11 * 1024 * 1024;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    // Minimal GCS stand-in: enough of the resumable protocol for the upload to
+    // reach the metadata check, which is where the re-entrant acquire happened.
+    nativelink_util::background_spawn!("deadlock_probe_server", async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let base = format!("http://127.0.0.1:{port}");
+            nativelink_util::background_spawn!("deadlock_probe_conn", async move {
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body = r#"{"kind":"storage#object","id":"test-bucket/test-object/1","selfLink":"https://example.invalid/o","mediaLink":"https://example.invalid/m","name":"test-object","bucket":"test-bucket","generation":"1","metageneration":"1","contentType":"application/octet-stream","storageClass":"STANDARD","size":"11534336","md5Hash":"1B2M2Y8AsgTpgAmY7PhCfg==","crc32c":"AAAAAA==","etag":"CAE=","timeCreated":"2024-01-01T00:00:00Z","updated":"2024-01-01T00:00:00Z","timeStorageClassUpdated":"2024-01-01T00:00:00Z"}"#;
+                    let response = if head.starts_with("POST") {
+                        // Start of a resumable session; hand back the upload URL.
+                        format!(
+                            "HTTP/1.1 200 OK\r\nLocation: {base}/upload\r\nContent-Length: 0\r\n\r\n"
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    };
+                    if socket.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let spec = ExperimentalGcsSpec {
+        // One chunk per upload keeps the stand-in server simple.
+        resumable_chunk_size: Some(16 * 1024 * 1024),
+        common: CommonObjectSpec {
+            multipart_max_concurrent_uploads: Some(MAX_CONCURRENT),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = Arc::new(GcsClient::new_mock(&spec, url).unwrap());
+
+    let mut uploads = Vec::with_capacity(MAX_CONCURRENT);
+    for i in 0..MAX_CONCURRENT {
+        let client = client.clone();
+        let (mut tx, mut rx) = make_buf_channel_pair();
+        let path = ObjectPath::new(BUCKET_NAME.to_string(), &format!("deadlock-probe-{i}"));
+        // `background_spawn!` and not `spawn!`: the latter aborts the task when
+        // its guard is dropped, which would starve the upload of data.
+        nativelink_util::background_spawn!("deadlock_probe_feed", async move {
+            let chunk = Bytes::from(vec![0u8; 1024 * 1024]);
+            for _ in 0..(UPLOAD_SIZE / (1024 * 1024)) {
+                if tx.send(chunk.clone()).await.is_err() {
+                    return;
+                }
+            }
+            drop(tx.send_eof());
+        });
+        uploads.push(nativelink_util::background_spawn!(
+            "deadlock_probe_upload",
+            async move {
+                client
+                    .upload_from_reader(&path, &mut rx, "upload-id", UPLOAD_SIZE as u64)
+                    .await
+            }
+        ));
+    }
+
+    // With the re-entrant acquire these never resolve. Whether an individual
+    // upload succeeds against the stand-in server is not the point -- the point
+    // is that the semaphore lets every task reach a conclusion at all.
+    for upload in uploads {
+        tokio::time::timeout(Duration::from_secs(20), upload)
+            .await
+            .expect(
+                "resumable uploads deadlocked: a permit is held while acquiring a second one \
+                 from the same semaphore",
+            )
+            .unwrap()
+            .err();
+    }
+
+    Ok(())
+}
