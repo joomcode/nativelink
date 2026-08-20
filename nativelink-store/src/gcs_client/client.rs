@@ -390,16 +390,23 @@ impl GcsClient {
                     .map_err(|e| Self::handle_gcs_error(&e))?;
             }
 
-            // Check if the object exists
-            match self.read_object_metadata(object_path).await? {
-                Some(_) => Ok(()),
-                None => Err(make_err!(
-                    Code::Internal,
-                    "Upload completed but object not found"
-                )),
-            }
+            Ok(())
         })
-        .await
+        .await?;
+
+        // Verify only after `with_connection` has released its permit.
+        // `read_object_metadata` acquires the same semaphore, so performing this
+        // check inside the closure means every resumable upload holds one permit
+        // while asking for a second. Once all `multipart_max_concurrent_uploads`
+        // permits are held by uploads waiting here, none can be released and the
+        // client deadlocks permanently -- `Semaphore::acquire` has no timeout.
+        match self.read_object_metadata(object_path).await? {
+            Some(_) => Ok(()),
+            None => Err(make_err!(
+                Code::Internal,
+                "Upload completed but object not found"
+            )),
+        }
     }
 }
 
