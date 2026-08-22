@@ -17,17 +17,20 @@ use core::task::{Context, Poll};
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::Future;
 use futures::stream::{FuturesUnordered, StreamExt, unfold};
 use ginepro::LoadBalancedChannel;
 use nativelink_config::stores::Retry;
 use nativelink_error::{Code, Error, ResultExt, make_err};
+use opentelemetry::KeyValue;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tonic::transport::{Channel, Endpoint, channel};
 use tracing::{debug, error, info, warn};
 
 use crate::background_spawn;
+use crate::metrics::CONNECTION_MANAGER_METRICS;
 use crate::retry::{self, Retrier, RetryResult};
 
 /// A helper utility that enables management of a suite of connections to an
@@ -36,6 +39,9 @@ use crate::retry::{self, Retrier, RetryResult};
 pub struct ConnectionManager {
     // The channel to request connections from the worker.
     worker_tx: mpsc::Sender<(String, oneshot::Sender<Connection>)>,
+    /// Mirrors `ConnectionManagerWorker::metric_attrs` so the caller-side wait
+    /// histogram carries the same endpoint label as the worker-side gauges.
+    metric_attrs: Vec<KeyValue>,
 }
 
 /// The index into `ConnectionManagerWorker::endpoints`.
@@ -114,6 +120,13 @@ struct ConnectionManagerWorker {
     retrier: Retrier,
 
     balanced_channel: bool,
+    /// Identifies this manager in the saturation metrics. Every `GrpcStore`
+    /// builds its own manager, so this is what separates e.g. one fs-cas shard
+    /// from another.
+    metric_attrs: Vec<KeyValue>,
+    /// Configured `max_concurrent_requests`, reported alongside the free count
+    /// so a dashboard can show saturation without hard-coding the limit.
+    permits_total: u64,
 }
 
 /// The maximum number of queued requests to obtain a connection from the
@@ -139,10 +152,20 @@ impl ConnectionManager {
         // which defeats the object since there would be no backpressure
         // applied. Therefore it makes sense for this to be unbounded.
         let (connection_tx, connection_rx) = mpsc::unbounded_channel();
-        let endpoints = endpoints
+        let endpoints: Vec<_> = endpoints
             .into_iter()
             .map(|endpoint| (0, endpoint))
             .collect();
+        // One label per manager. Endpoints of a single store share a manager,
+        // so join them rather than emitting a series per endpoint.
+        let endpoint_label = endpoints
+            .iter()
+            .map(|(_, endpoint)| endpoint.uri().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let metric_attrs = vec![KeyValue::new("connection_manager_endpoint", endpoint_label)];
+        let manager_attrs = metric_attrs.clone();
+        let permits_total = max_concurrent_requests as u64;
 
         if max_concurrent_requests == 0 {
             max_concurrent_requests = Semaphore::MAX_PERMITS;
@@ -165,13 +188,18 @@ impl ConnectionManager {
                 retry,
             ),
             balanced_channel,
+            metric_attrs,
+            permits_total,
         };
         background_spawn!("connection_manager_worker_spawn", async move {
             worker
                 .service_requests(connections_per_endpoint, worker_rx, connection_rx)
                 .await;
         });
-        Self { worker_tx }
+        Self {
+            worker_tx,
+            metric_attrs: manager_attrs,
+        }
     }
 
     /// Get a Connection that can be used as a `tonic::Channel`, except it
@@ -179,12 +207,20 @@ impl ConnectionManager {
     /// the number of concurrent connections.
     pub async fn connection(&self, reason: String) -> Result<Connection, Error> {
         let (tx, rx) = oneshot::channel();
+        // There is no deadline on this wait, so the histogram is the only thing
+        // that distinguishes "slow upstream" from "no permit will ever come".
+        let started = Instant::now();
         self.worker_tx
             .send((reason, tx))
             .await
             .map_err(|err| make_err!(Code::Unavailable, "Requesting a new connection: {err:?}"))?;
-        rx.await
-            .map_err(|err| make_err!(Code::Unavailable, "Waiting for a new connection: {err:?}"))
+        let result = rx
+            .await
+            .map_err(|err| make_err!(Code::Unavailable, "Waiting for a new connection: {err:?}"));
+        CONNECTION_MANAGER_METRICS
+            .permit_wait_duration
+            .record(started.elapsed().as_secs_f64() * 1000.0, &self.metric_attrs);
+        result
     }
 }
 
@@ -362,6 +398,23 @@ impl ConnectionManagerWorker {
         ))
     }
 
+    /// Publish gate saturation. Called after every state change, so a wedged
+    /// manager is visible as `permits_available == 0` with `waiting_requests`
+    /// pinned above zero, which no other metric shows.
+    fn record_saturation(&self) {
+        let metrics = &*CONNECTION_MANAGER_METRICS;
+        metrics
+            .permits_total
+            .record(self.permits_total, &self.metric_attrs);
+        metrics.permits_available.record(
+            self.available_connections.available_permits() as u64,
+            &self.metric_attrs,
+        );
+        metrics
+            .waiting_requests
+            .record(self.waiting_connections.len() as u64, &self.metric_attrs);
+    }
+
     // This must never be made async otherwise the select may cancel it.
     fn handle_worker(&mut self, reason: String, tx: oneshot::Sender<Connection>) {
         let maybe_permit = self.available_connections.clone().try_acquire_owned().ok();
@@ -380,6 +433,7 @@ impl ConnectionManagerWorker {
             );
             self.waiting_connections.push_back((reason, tx));
         }
+        self.record_saturation();
     }
 
     fn provide_channel(
@@ -413,6 +467,7 @@ impl ConnectionManagerWorker {
             debug!(reason, "ConnectionManager: channel available, running");
             self.provide_channel(channel, tx, permit);
         }
+        self.record_saturation();
     }
 
     // This must never be made async otherwise the select may cancel it.
@@ -445,6 +500,7 @@ impl ConnectionManagerWorker {
                 }
             }
         }
+        self.record_saturation();
     }
 }
 

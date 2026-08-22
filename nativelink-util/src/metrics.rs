@@ -2090,6 +2090,69 @@ impl GcsCustomTimeAttrs {
 }
 
 /// Global GCS store metrics instruments.
+/// Saturation of the `ConnectionManager` concurrency gate.
+///
+/// A `GrpcStore` holds one permit of `max_concurrent_requests` for the whole
+/// lifetime of an RPC, and `ConnectionManager::connection` waits for a permit
+/// with no deadline. If enough RPCs stall, every permit is held and the store
+/// stops serving entirely: no errors, no CPU, and no recovery short of a
+/// restart. Nothing in the store-operation metrics shows this, because a
+/// request that never gets a permit never records a duration or a result -- the
+/// only visible symptom is throughput silently going to zero.
+///
+/// `permits_available` at 0 with `waiting_requests` climbing is that state.
+pub static CONNECTION_MANAGER_METRICS: LazyLock<ConnectionManagerMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    ConnectionManagerMetrics {
+        permits_available: meter
+            .u64_gauge("connection_manager_permits_available")
+            .with_description(
+                "Free max_concurrent_requests permits. Zero means the store is refusing to \
+                 start new RPCs.",
+            )
+            .with_unit("{permit}")
+            .build(),
+
+        permits_total: meter
+            .u64_gauge("connection_manager_permits_total")
+            .with_description("Configured max_concurrent_requests for this endpoint")
+            .with_unit("{permit}")
+            .build(),
+
+        waiting_requests: meter
+            .u64_gauge("connection_manager_waiting_requests")
+            .with_description("Requests queued for a permit or an established channel")
+            .with_unit("{request}")
+            .build(),
+
+        permit_wait_duration: meter
+            .f64_histogram("connection_manager_permit_wait_duration")
+            .with_description("Time spent waiting for a connection permit in milliseconds")
+            .with_unit("ms")
+            // Healthy is sub-millisecond. The upper boundaries have to reach
+            // past the rpc_timeout_s values in use so a saturated gate is
+            // distinguishable from a slow one.
+            .with_boundaries(vec![
+                1.0, 10.0, 100.0, 500.0, 1000.0, 5000.0, 15000.0, 30000.0, 60000.0, 300_000.0,
+            ])
+            .build(),
+    }
+});
+
+/// `OpenTelemetry` instruments for `ConnectionManager` saturation.
+#[derive(Debug)]
+pub struct ConnectionManagerMetrics {
+    /// Gauge of currently free permits
+    pub permits_available: metrics::Gauge<u64>,
+    /// Gauge of the configured permit count
+    pub permits_total: metrics::Gauge<u64>,
+    /// Gauge of requests queued for a permit or channel
+    pub waiting_requests: metrics::Gauge<u64>,
+    /// Histogram of permit acquisition wait time in milliseconds
+    pub permit_wait_duration: metrics::Histogram<f64>,
+}
+
 pub static GCS_METRICS: LazyLock<GcsMetrics> = LazyLock::new(|| {
     let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
 
