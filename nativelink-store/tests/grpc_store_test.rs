@@ -626,3 +626,144 @@ async fn compressed_read_that_never_starts_falls_back_to_identity() -> Result<()
     );
     Ok(())
 }
+
+/// A `ByteStream` server that consumes an entire write stream and then never
+/// answers. Models the state that wedged `CAS_FS_SHARD_STORE` in production:
+/// the client finished sending, so the encoder half of
+/// `GrpcStore::update_compressed` completed, but the RPC never settled.
+#[derive(Clone, Default)]
+struct StallingStreamServer;
+
+#[tonic::async_trait]
+impl ByteStream for StallingStreamServer {
+    type ReadStream = Pin<Box<dyn Stream<Item = Result<ReadResponse, Status>> + Send + 'static>>;
+
+    async fn read(
+        &self,
+        _grpc_request: Request<ReadRequest>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        Err(Status::unimplemented("read"))
+    }
+
+    async fn write(
+        &self,
+        grpc_request: Request<Streaming<WriteRequest>>,
+    ) -> Result<Response<WriteResponse>, Status> {
+        let mut stream = grpc_request.into_inner();
+        // Drain everything so the client-side encoder reaches EOF and finishes.
+        while let Some(Ok(_)) = stream.next().await {}
+        // Then never settle the RPC.
+        core::future::pending::<()>().await;
+        unreachable!()
+    }
+
+    async fn query_write_status(
+        &self,
+        _grpc_request: Request<QueryWriteStatusRequest>,
+    ) -> Result<Response<QueryWriteStatusResponse>, Status> {
+        Err(Status::unimplemented("query_write_status"))
+    }
+}
+
+async fn make_stalling_bytestream_server() -> u16 {
+    let server = ByteStreamServer::new(StallingStreamServer);
+    let listener = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    background_spawn!("stalling_server", async move {
+        Server::builder()
+            .add_service(server)
+            .serve_with_incoming(listener)
+            .await
+            .unwrap();
+    });
+    port
+}
+
+/// A stalled RPC must not permanently consume its `max_concurrent_requests`
+/// permit.
+///
+/// `ConnectionManager` holds one permit for the whole lifetime of an RPC and
+/// `ConnectionManager::connection` waits for a permit with no timeout. So once
+/// `max_concurrent_requests` RPCs are stuck, every later request to that store
+/// parks forever and the store is dead until the process restarts.
+///
+/// This is what took out `CAS_FS_SHARD_STORE`: those shard stores enable
+/// `experimental_remote_cache_compression` but set no `rpc_timeout_s`, and in
+/// `update_compressed` the branch where the encoder finishes first awaits the
+/// write with no bound. `CAS_S3_GRPC_STORE` runs the same code and survived,
+/// because it sets `rpc_timeout_s`.
+///
+/// `rpc_timeout_s` is therefore load bearing, not an optimisation. Saturate the
+/// store with stalled compressed writes, then assert a later write still gets a
+/// permit.
+#[nativelink_test]
+async fn test_stalled_compressed_write_does_not_wedge_the_store() -> Result<(), Error> {
+    const MAX_CONCURRENT: usize = 2;
+    // Must be >= WIRE_COMPRESSION_MIN_SIZE_BYTES (64KiB) to take the
+    // compressed path.
+    const BLOB_SIZE: usize = 96 * 1024;
+
+    // A stalled RPC holds its permit for rpc_timeout_s x (max_retries + 1).
+    // Keep that short so the test is fast, and derive the assertion budget from
+    // it rather than hard-coding one: the invariant under test is "a bounded
+    // timeout releases the permit", not any particular production value. With
+    // rpc_timeout_s = 0 the hold is unbounded and no budget is ever enough,
+    // which is the failure this guards.
+    const RPC_TIMEOUT_S: u64 = 1;
+    const MAX_RETRIES: usize = 1;
+    let budget = Duration::from_secs(RPC_TIMEOUT_S * (MAX_RETRIES as u64 + 1)) * 4;
+
+    let port = make_stalling_bytestream_server().await;
+    let mut spec = test_spec(format!("http://localhost:{port}"), false);
+    spec.max_concurrent_requests = MAX_CONCURRENT;
+    spec.connections_per_endpoint = MAX_CONCURRENT;
+    spec.experimental_remote_cache_compression = Some(true);
+    spec.rpc_timeout_s = RPC_TIMEOUT_S;
+    spec.retry = Retry {
+        max_retries: MAX_RETRIES,
+        ..Retry::default()
+    };
+    // `GrpcStore::new` already yields an `Arc`.
+    let store = GrpcStore::new(&spec).await?;
+
+    let drive_one_write = |store: Arc<GrpcStore>| async move {
+        let digest = DigestInfo::try_new(VALID_HASH, BLOB_SIZE).unwrap();
+        let (mut tx, rx) = make_buf_channel_pair();
+        background_spawn!("stalled_write_feed", async move {
+            if tx.send(vec![0u8; BLOB_SIZE].into()).await.is_err() {
+                return;
+            }
+            drop(tx.send_eof());
+        });
+        store
+            .update(
+                digest,
+                rx,
+                UploadSizeInfo::ExactSize(BLOB_SIZE.try_into().unwrap()),
+            )
+            .await
+    };
+
+    // Occupy every permit with a write the server will never answer.
+    let saturators: Vec<_> = (0..MAX_CONCURRENT)
+        .map(|_| background_spawn!("stalled_write", drive_one_write(store.clone())))
+        .collect();
+
+    // Give them time to acquire their permits and reach the stalled RPC.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The permits must come back. With no rpc_timeout_s they never do, because
+    // ConnectionManager::connection waits for a permit without a deadline.
+    timeout(budget, drive_one_write(store.clone()))
+        .await
+        .expect(
+            "no permit became available: every max_concurrent_requests permit is still held by \
+             a stalled RPC, so the store is wedged rather than merely slow",
+        )
+        .err();
+
+    for saturator in saturators {
+        drop(timeout(budget, saturator).await);
+    }
+    Ok(())
+}
