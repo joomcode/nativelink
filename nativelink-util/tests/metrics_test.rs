@@ -17,9 +17,10 @@ use nativelink_util::action_messages::{
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::metrics::{
-    CACHE_METRICS, CacheMetricAttrs, EXECUTION_IDENTITY_OTHER, EXECUTION_IDENTITY_UNKNOWN,
-    EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage, WORKER_POOL_METRICS,
-    execution_output_bytes, make_execution_attributes, record_completed_execution_metrics,
+    CACHE_METRICS, CONNECTION_MANAGER_METRICS, CacheMetricAttrs, EXECUTION_IDENTITY_OTHER,
+    EXECUTION_IDENTITY_UNKNOWN, EXECUTION_METRICS, ExecutionMetricAttrs, ExecutionStage,
+    WORKER_POOL_METRICS, execution_output_bytes, make_execution_attributes,
+    record_completed_execution_metrics,
 };
 use opentelemetry::KeyValue;
 
@@ -130,6 +131,9 @@ fn test_metrics_lazy_initialization() {
     let _cache_metrics = &*CACHE_METRICS;
     let _execution_metrics = &*EXECUTION_METRICS;
     let _worker_pool_metrics = &*WORKER_POOL_METRICS;
+    // Saturation of the connection gate. Building these eagerly catches a bad
+    // instrument definition here rather than the first time a store wedges.
+    let _connection_manager_metrics = &*CONNECTION_MANAGER_METRICS;
 
     // If we got here without panicking, the metrics were initialized successfully
 }
