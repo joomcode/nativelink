@@ -2249,6 +2249,15 @@ pub static GCS_METRICS: LazyLock<GcsMetrics> = LazyLock::new(|| {
             .with_unit("{operation}")
             .build(),
 
+        permits_available: meter
+            .u64_gauge("gcs_permits_available")
+            .with_description(
+                "Free multipart_max_concurrent_uploads permits on a GCS client. Zero means \
+                 the client has stopped starting new object operations.",
+            )
+            .with_unit("{permit}")
+            .build(),
+
         custom_time_duration: meter
             .f64_histogram("gcs_custom_time_duration")
             .with_description("Duration of customTime metadata writes in milliseconds")
@@ -2267,6 +2276,9 @@ pub static GCS_METRICS: LazyLock<GcsMetrics> = LazyLock::new(|| {
 /// `OpenTelemetry` metrics instruments for the GCS store.
 #[derive(Debug)]
 pub struct GcsMetrics {
+    /// Gauge of free client permits. `multipart_max_concurrent_uploads` gates
+    /// every object operation, and exhausting it stops the client silently.
+    pub permits_available: metrics::Gauge<u64>,
     /// Counter of `customTime` refresh decisions by outcome
     pub custom_time_operations: metrics::Counter<u64>,
     /// Histogram of `customTime` write durations in milliseconds

@@ -33,6 +33,7 @@ use gcloud_storage::http::resumable_upload_client::{ChunkSize, UploadStatus};
 use nativelink_config::stores::ExperimentalGcsSpec;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_util::buf_channel::DropCloserReadHalf;
+use nativelink_util::metrics::GCS_METRICS;
 use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::sleep;
@@ -219,10 +220,21 @@ impl GcsClient {
         let permit = self.semaphore.acquire().await.map_err(|e| {
             Error::from_std_err(Code::Internal, &e).append("Failed to acquire connection permit")
         })?;
+        self.record_permits_available();
 
         let result = operation().await;
         drop(permit);
+        self.record_permits_available();
         result
+    }
+
+    /// Publish how many client permits remain. Permit exhaustion is otherwise
+    /// invisible: a blocked operation records no duration and no result, so the
+    /// only symptom is object throughput silently reaching zero.
+    fn record_permits_available(&self) {
+        GCS_METRICS
+            .permits_available
+            .record(self.semaphore.available_permits() as u64, &[]);
     }
 
     /// Convert GCS object to our internal representation
