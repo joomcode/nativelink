@@ -17,7 +17,9 @@ use core::time::Duration;
 use nativelink_config::stores::{ClientTlsConfig, GrpcEndpoint};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
-use nativelink_util::tls_utils::{endpoint_from, load_balanced_options, load_client_config};
+use nativelink_util::tls_utils::{
+    balanced_endpoint, endpoint_from, load_balanced_options, load_client_config,
+};
 use tempfile::NamedTempFile;
 
 #[nativelink_test]
@@ -200,23 +202,12 @@ fn grpc_endpoint(connect_timeout_s: u64) -> GrpcEndpoint {
     }
 }
 
-/// ginepro builds its own `Endpoint`s, so anything `load_balanced_options` does
-/// not carry across is silently lost on `load_balanced_channel: true` stores.
-/// That is how a stalled connection once went undetected until a pod restart.
 #[nativelink_test]
 async fn test_load_balanced_options_carry_endpoint_configuration() -> Result<(), Error> {
     let options = load_balanced_options(&grpc_endpoint(7), Duration::from_mins(1))?;
 
-    assert_eq!(
-        options.connect_timeout,
-        Duration::from_secs(7),
-        "connect_timeout_s must reach ginepro"
-    );
-    assert_eq!(
-        options.request_timeout,
-        Duration::from_mins(1),
-        "rpc_timeout_s must reach ginepro; it is the only liveness backstop there"
-    );
+    assert_eq!(options.connect_timeout(), Duration::from_secs(7));
+    assert_eq!(options.request_timeout(), Duration::from_mins(1));
     Ok(())
 }
 
@@ -224,7 +215,49 @@ async fn test_load_balanced_options_carry_endpoint_configuration() -> Result<(),
 async fn test_load_balanced_options_default_connect_timeout() -> Result<(), Error> {
     let options = load_balanced_options(&grpc_endpoint(0), Duration::ZERO)?;
 
-    assert_eq!(options.connect_timeout, Duration::from_secs(30));
-    assert_eq!(options.request_timeout, Duration::ZERO);
+    assert_eq!(options.connect_timeout(), Duration::from_secs(30));
+    assert_eq!(options.request_timeout(), Duration::ZERO);
+    Ok(())
+}
+
+#[nativelink_test]
+async fn test_load_balanced_options_require_explicit_port() -> Result<(), Error> {
+    let mut config = grpc_endpoint(0);
+    config.address = "grpc://example.com".to_string();
+    let result = load_balanced_options(&config, Duration::ZERO);
+    assert!(matches!(
+        result,
+        Err(e) if e.to_string().contains("requires an explicit host and port")
+    ));
+    Ok(())
+}
+
+/// The whole point of the DNS-balanced path is that each per-address
+/// endpoint carries the full transport configuration (most importantly the
+/// HTTP/2 keepalive that detects silently dead peers), unlike the previous
+/// ginepro-based implementation which dropped it.
+#[nativelink_test]
+async fn test_balanced_endpoint_dials_resolved_address() -> Result<(), Error> {
+    let options = load_balanced_options(&grpc_endpoint(7), Duration::ZERO)?;
+    let endpoint = balanced_endpoint(&options, "127.0.0.1:1234".parse().unwrap())?;
+    assert_eq!(endpoint.uri().to_string(), "http://127.0.0.1:1234/");
+    Ok(())
+}
+
+#[nativelink_test]
+async fn test_balanced_endpoint_rejects_tls_config_on_plaintext_scheme() -> Result<(), Error> {
+    let mut config = grpc_endpoint(0);
+    config.tls_config = Some(ClientTlsConfig {
+        use_native_roots: Some(true),
+        ca_file: None,
+        cert_file: None,
+        key_file: None,
+    });
+    let options = load_balanced_options(&config, Duration::ZERO)?;
+    let result = balanced_endpoint(&options, "127.0.0.1:1234".parse().unwrap());
+    assert!(matches!(
+        result,
+        Err(e) if e.to_string().contains("but the scheme is not https or grpcs")
+    ));
     Ok(())
 }

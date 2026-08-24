@@ -308,6 +308,7 @@ async fn grpc_scheduler_forwards_the_client_and_resolves_its_operation() -> Resu
         connections_per_endpoint: 0,
         // Mixed case on purpose, header names are case-insensitive.
         forward_headers: vec!["Authorization".to_string()],
+        load_balanced_channel: false,
     })?);
     let front = make_execution_server(&store_manager, scheduler.clone())?;
 

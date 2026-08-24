@@ -151,6 +151,7 @@ fn grpc_spec(port: u16, compression: bool) -> GrpcSpec {
         forward_headers: vec![],
         experimental_read_batching: None,
         experimental_remote_cache_compression: Some(compression),
+        load_balanced_channel: false,
     }
 }
 

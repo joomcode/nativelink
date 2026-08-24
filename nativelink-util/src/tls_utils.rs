@@ -121,47 +121,125 @@ pub fn endpoint_from(
     Ok(endpoint_transport)
 }
 
-/// The subset of endpoint configuration that ginepro's `LoadBalancedChannel`
-/// can express.
+/// Configuration for the DNS-balanced connection path, used when a store or
+/// scheduler sets `load_balanced_channel: true`.
 ///
-/// ginepro does not reuse the `tonic::transport::Endpoint` we build in
-/// [`endpoint`]; it constructs its own from a host and port. Anything not
-/// carried across here is silently lost. In particular ginepro has **no
-/// keepalive setter**, so a load-balanced store cannot detect a half-open
-/// connection at the transport layer, and `GrpcSpec::rpc_timeout_s` is its only
-/// liveness backstop.
-#[derive(Clone, Debug, Default)]
+/// The plain path dials the configured URI once per pooled connection and
+/// lets the OS resolver pick an address. This path instead re-resolves DNS on
+/// every (re)connect and spreads the pooled connections across the resolved
+/// addresses. Every connection is a regular tonic channel built from the full
+/// `GrpcEndpoint` configuration, so HTTP/2 and TCP keepalive apply — that is
+/// what detects a peer that died without closing the connection (e.g. a
+/// scaled-in pod) and lets the connection manager replace it.
+///
+/// This used to be backed by ginepro's `LoadBalancedChannel`, which builds
+/// its own internal endpoints with **no keepalive setter**. A silently dead
+/// connection was therefore only bounded by `rpc_timeout_s` (often disabled),
+/// which is how a CAS scale-in once wedged the worker fleet until the CAS
+/// pods were restarted.
+#[derive(Clone, Debug)]
 pub struct LoadBalancedOptions {
-    /// Connection timeout applied to every `Endpoint` ginepro creates.
-    pub connect_timeout: Duration,
-    /// Per-request timeout applied to every `Endpoint` ginepro creates.
-    /// Zero leaves it unset.
-    pub request_timeout: Duration,
-    /// TLS must be handed over explicitly. Without it a `grpcs://` endpoint
-    /// silently connects in plaintext.
-    pub tls_config: Option<tonic::transport::ClientTlsConfig>,
+    /// The endpoint configuration that per-address endpoints are built from.
+    endpoint_config: GrpcEndpoint,
+    /// Per-request timeout applied to every per-address endpoint. Zero
+    /// leaves it unset. Comes from `GrpcSpec::rpc_timeout_s`.
+    request_timeout: Duration,
 }
 
-/// Build the ginepro settings for `endpoint_config`, used when the store sets
-/// `load_balanced_channel: true`. `rpc_timeout` comes from
-/// `GrpcSpec::rpc_timeout_s`.
+impl LoadBalancedOptions {
+    /// Timeout for DNS resolution and connection establishment.
+    #[must_use]
+    pub const fn connect_timeout(&self) -> Duration {
+        connect_timeout(&self.endpoint_config)
+    }
+
+    /// The per-request timeout, zero if disabled.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+}
+
+/// Build the balancing settings for `endpoint_config`, used when the store
+/// sets `load_balanced_channel: true`. `rpc_timeout` comes from
+/// `GrpcSpec::rpc_timeout_s`. Fails at startup if the address cannot be
+/// balanced (missing host or port) rather than on first connect.
 pub fn load_balanced_options(
     endpoint_config: &GrpcEndpoint,
     rpc_timeout: Duration,
 ) -> Result<LoadBalancedOptions, Error> {
-    if rpc_timeout.is_zero() {
-        warn!(
-            address = %endpoint_config.address,
-            "load_balanced_channel is enabled with rpc_timeout_s=0. ginepro cannot \
-             configure HTTP/2 or TCP keepalive, so a stalled connection is never \
-             detected and its concurrency permit is held forever. Set rpc_timeout_s.",
-        );
+    let uri = Uri::try_from(endpoint_config.address.as_str()).map_err(|e| {
+        Error::from_std_err(Code::InvalidArgument, &e).append(format!(
+            "Unable to parse load-balanced endpoint {}",
+            endpoint_config.address
+        ))
+    })?;
+    if uri.host().is_none() || uri.port_u16().is_none() {
+        return Err(make_input_err!(
+            "load_balanced_channel requires an explicit host and port in {}",
+            endpoint_config.address
+        ));
     }
+    // Surface TLS misconfiguration now instead of on first connect.
+    load_client_config(&endpoint_config.tls_config)?;
     Ok(LoadBalancedOptions {
-        connect_timeout: connect_timeout(endpoint_config),
+        endpoint_config: endpoint_config.clone(),
         request_timeout: rpc_timeout,
-        tls_config: load_client_config(&endpoint_config.tls_config)?,
     })
+}
+
+/// Build an `Endpoint` for one resolved address of a load-balanced target,
+/// carrying all transport settings (keepalive, timeouts, TLS) from the
+/// original configuration. TLS still validates against the configured
+/// hostname, not the dialed address.
+pub fn balanced_endpoint(
+    options: &LoadBalancedOptions,
+    addr: core::net::SocketAddr,
+) -> Result<tonic::transport::Endpoint, Error> {
+    let config = &options.endpoint_config;
+    // Validated in `load_balanced_options`.
+    let original = Uri::try_from(config.address.as_str()).map_err(|e| {
+        Error::from_std_err(Code::InvalidArgument, &e)
+            .append(format!("Unable to parse endpoint {}", config.address))
+    })?;
+    let is_tls = matches!(original.scheme_str(), Some("grpcs" | "https"));
+    let scheme = if is_tls { "https" } else { "http" };
+    let mut endpoint = tonic::transport::Endpoint::from_shared(format!("{scheme}://{addr}"))
+        .map_err(|e| {
+            Error::from_std_err(Code::InvalidArgument, &e).append(format!(
+                "Invalid resolved address {addr} for {}",
+                config.address
+            ))
+        })?;
+    if is_tls {
+        let Some(tls_config) = load_client_config(&config.tls_config)? else {
+            return Err(make_input_err!(
+                "The scheme of {} is https or grpcs, but no TLS configuration was provided",
+                config.address
+            ));
+        };
+        let Some(host) = original.host() else {
+            return Err(make_input_err!(
+                "Unable to determine host of endpoint: {}",
+                config.address
+            ));
+        };
+        endpoint = endpoint
+            .tls_config(tls_config.domain_name(host))
+            .map_err(|e| {
+                Error::from_std_err(Code::InvalidArgument, &e).append("Setting TLS configuration")
+            })?;
+    } else if config.tls_config.is_some() {
+        return Err(make_input_err!(
+            "You have set TLS configuration on {}, but the scheme is not https or grpcs",
+            config.address
+        ));
+    }
+    endpoint = apply_transport_settings(endpoint, config);
+    if !options.request_timeout.is_zero() {
+        endpoint = endpoint.timeout(options.request_timeout);
+    }
+    Ok(endpoint)
 }
 
 const fn connect_timeout(endpoint_config: &GrpcEndpoint) -> Duration {
@@ -172,13 +250,14 @@ const fn connect_timeout(endpoint_config: &GrpcEndpoint) -> Duration {
     }
 }
 
-pub fn endpoint(endpoint_config: &GrpcEndpoint) -> Result<tonic::transport::Endpoint, Error> {
-    let endpoint = endpoint_from(
-        &endpoint_config.address,
-        load_client_config(&endpoint_config.tls_config)?,
-    )?;
-
-    let connect_timeout = connect_timeout(endpoint_config);
+/// Apply the transport settings from `endpoint_config` — connect timeout,
+/// TCP and HTTP/2 keepalive, concurrency limit — to `endpoint`. Used for
+/// both the directly-dialed endpoint and every per-address endpoint of a
+/// load-balanced target.
+fn apply_transport_settings(
+    endpoint: tonic::transport::Endpoint,
+    endpoint_config: &GrpcEndpoint,
+) -> tonic::transport::Endpoint {
     let tcp_keepalive = if endpoint_config.tcp_keepalive_s > 0 {
         Duration::from_secs(endpoint_config.tcp_keepalive_s)
     } else {
@@ -195,18 +274,8 @@ pub fn endpoint(endpoint_config: &GrpcEndpoint) -> Result<tonic::transport::Endp
         Duration::from_secs(20)
     };
 
-    info!(
-        address = %endpoint_config.address,
-        concurrency_limit = ?endpoint_config.concurrency_limit,
-        connect_timeout_s = connect_timeout.as_secs(),
-        tcp_keepalive_s = tcp_keepalive.as_secs(),
-        http2_keepalive_interval_s = http2_keepalive_interval.as_secs(),
-        http2_keepalive_timeout_s = http2_keepalive_timeout.as_secs(),
-        "tls_utils::endpoint: creating gRPC endpoint with keepalive",
-    );
-
     let mut endpoint = endpoint
-        .connect_timeout(connect_timeout)
+        .connect_timeout(connect_timeout(endpoint_config))
         .tcp_keepalive(Some(tcp_keepalive))
         .http2_keep_alive_interval(http2_keepalive_interval)
         .keep_alive_timeout(http2_keepalive_timeout)
@@ -216,5 +285,21 @@ pub fn endpoint(endpoint_config: &GrpcEndpoint) -> Result<tonic::transport::Endp
         endpoint = endpoint.concurrency_limit(concurrency_limit);
     }
 
-    Ok(endpoint)
+    endpoint
+}
+
+pub fn endpoint(endpoint_config: &GrpcEndpoint) -> Result<tonic::transport::Endpoint, Error> {
+    let endpoint = endpoint_from(
+        &endpoint_config.address,
+        load_client_config(&endpoint_config.tls_config)?,
+    )?;
+
+    info!(
+        address = %endpoint_config.address,
+        concurrency_limit = ?endpoint_config.concurrency_limit,
+        connect_timeout_s = connect_timeout(endpoint_config).as_secs(),
+        "tls_utils::endpoint: creating gRPC endpoint with keepalive",
+    );
+
+    Ok(apply_transport_settings(endpoint, endpoint_config))
 }

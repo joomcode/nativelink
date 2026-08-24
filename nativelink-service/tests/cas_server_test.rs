@@ -1566,6 +1566,7 @@ async fn chunking_on_grpc_store_forbids_index_store() -> Result<(), Box<dyn core
                 forward_headers: vec![],
                 experimental_read_batching: None,
                 experimental_remote_cache_compression: Some(false),
+                load_balanced_channel: false,
             }),
             &store_manager,
             None,
