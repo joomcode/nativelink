@@ -103,11 +103,11 @@ impl GrpcScheduler {
         jitter_fn: Arc<dyn Fn(Duration) -> Duration + Send + Sync>,
     ) -> Result<Self, Error> {
         let endpoint = tls_utils::endpoint(&spec.endpoint)?;
-        // ginepro ignores the Endpoint above and builds its own, so the
-        // settings it can honour have to be carried across explicitly.
+        // The balanced path re-resolves DNS per connection and builds
+        // per-address endpoints from the same configuration.
         let balanced_options = if spec.load_balanced_channel {
-            // schedulers::GrpcSpec has no rpc_timeout_s, so this path has no
-            // per-RPC bound at all. load_balanced_options warns about it.
+            // schedulers::GrpcSpec has no rpc_timeout_s; dead connections are
+            // still detected via the endpoint's HTTP/2 keepalive.
             Some(tls_utils::load_balanced_options(
                 &spec.endpoint,
                 Duration::ZERO,

@@ -29,7 +29,7 @@ use core::pin::Pin;
 use core::time::Duration;
 use std::sync::Arc;
 
-use nativelink_config::stores::Retry;
+use nativelink_config::stores::{GrpcEndpoint, Retry};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
 use nativelink_proto::google::bytestream::byte_stream_server::{ByteStream, ByteStreamServer};
@@ -39,16 +39,13 @@ use nativelink_proto::google::bytestream::{
 };
 use nativelink_util::background_spawn;
 use nativelink_util::connection_manager::ConnectionManager;
-use nativelink_util::tls_utils::LoadBalancedOptions;
+use nativelink_util::tls_utils::load_balanced_options;
 use pretty_assertions::assert_eq;
 use tokio::time::timeout;
 use tokio_stream::Stream;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Endpoint, Server};
 use tonic::{Request, Response, Status, Streaming};
-
-mod dns_utils;
-use dns_utils::dns_configured;
 
 #[derive(Clone)]
 struct FakeByteStream;
@@ -192,33 +189,28 @@ async fn unbalanced_channel_establishes_connection() -> Result<(), Error> {
 async fn balanced_channel_establishes_connection() -> Result<(), Error> {
     const MAX_CONCURRENT: usize = 1;
 
-    // The load-balanced channel needs ginepro's default DNS resolver.
-    if !dns_configured() {
-        eprintln!(
-            "Skipping balanced_channel_establishes_connection: no DNS configuration \
-             available (e.g. sandboxed Nix build)"
-        );
-        return Ok(());
-    }
-
     let endpoint = fake_grpc_server_endpoint().await;
+    let config = GrpcEndpoint {
+        address: format!("grpc://{}", endpoint.uri().authority().unwrap()),
+        tls_config: None,
+        concurrency_limit: None,
+        connect_timeout_s: 30,
+        tcp_keepalive_s: 0,
+        http2_keepalive_interval_s: 0,
+        http2_keepalive_timeout_s: 0,
+    };
+    let options = load_balanced_options(&config, Duration::ZERO)?;
     let cm = ConnectionManager::new(
-        vec![(
-            endpoint,
-            Some(LoadBalancedOptions {
-                connect_timeout: Duration::from_secs(30),
-                ..Default::default()
-            }),
-        )],
+        vec![(endpoint, Some(options))],
         MAX_CONCURRENT,
         MAX_CONCURRENT,
         Retry::default(),
         no_jitter(),
     );
 
-    // With load-balancing options present the worker uses the ginepro
-    // `LoadBalancedChannel` path; acquiring a connection within the timeout
-    // proves that branch resolves the endpoint and produces a usable channel.
+    // With load-balancing options present the worker resolves the address
+    // itself and dials one resolved backend; acquiring a connection within
+    // the timeout proves that path produces a usable channel.
     let conn = timeout(Duration::from_secs(5), cm.connection("balanced".into()))
         .await
         .expect("acquire blocked >5s — load-balanced path did not produce a channel")?;

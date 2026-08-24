@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::net::SocketAddr;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll};
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -21,7 +23,6 @@ use std::time::Instant;
 
 use futures::Future;
 use futures::stream::{FuturesUnordered, StreamExt, unfold};
-use ginepro::{LoadBalancedChannel, ResolutionStrategy};
 use nativelink_config::stores::Retry;
 use nativelink_error::{Code, Error, make_err};
 use opentelemetry::KeyValue;
@@ -99,8 +100,8 @@ struct EstablishedChannel {
 /// given endpoint.
 struct ConnectionManagerWorker {
     /// The endpoints to establish Channels, the identifier of the last
-    /// connection attempt to that endpoint, and the ginepro settings to use if
-    /// the store enabled load balancing for it.
+    /// connection attempt to that endpoint, and the DNS-balancing settings to
+    /// use if the store enabled load balancing for it.
     endpoints: Vec<(ConnectionIndex, Endpoint, Option<LoadBalancedOptions>)>,
     /// The channel used to communicate between a Connection and the worker.
     connection_tx: mpsc::UnboundedSender<ConnectionRequest>,
@@ -368,68 +369,97 @@ impl ConnectionManagerWorker {
         ))
     }
 
-    /// Build a ginepro `LoadBalancedChannel` for `endpoint`.
+    /// Establish one connection of a load-balanced target.
     ///
-    /// ginepro constructs its own `Endpoint`s internally, so every setting we
-    /// applied in `tls_utils::endpoint` is lost unless it is re-applied here
-    /// from `options`. ginepro has no keepalive setter at all, so this path
-    /// relies on `options.request_timeout` (`GrpcSpec::rpc_timeout_s`) to bound
-    /// a stalled connection; without it a stalled RPC holds its concurrency
-    /// permit forever and the store deadlocks.
+    /// Re-resolves DNS on every attempt and dials one resolved address,
+    /// round-robining across them so the pooled connections spread over the
+    /// available backends. The resulting channel is a regular tonic channel
+    /// built from the full endpoint configuration, so HTTP/2 keepalive
+    /// detects a silently dead peer and the resulting transport error makes
+    /// the manager replace the connection — which resolves DNS again and
+    /// lands on a live backend.
+    ///
+    /// This used to build a ginepro `LoadBalancedChannel`, which has no
+    /// keepalive setter. A backend that vanished without closing its
+    /// connections (e.g. a scaled-in pod) then wedged every RPC routed to
+    /// it for `rpc_timeout_s` (or forever when disabled), pinning
+    /// concurrency permits until the whole store stalled.
     async fn load_balanced_channel(
         endpoint: Endpoint,
         options: &LoadBalancedOptions,
     ) -> Option<(RetryResult<Channel>, Endpoint)> {
+        /// Spreads connection attempts across resolved addresses. Global on
+        /// purpose: it only needs to keep the pool from dialing the same
+        /// address every time, not provide per-target fairness.
+        static NEXT_ADDR: AtomicUsize = AtomicUsize::new(0);
+
         let uri = endpoint.uri().clone();
-        let Some(host) = uri.host().map(ToString::to_string) else {
+        // Validated in `tls_utils::load_balanced_options`.
+        let (Some(host), Some(port)) = (uri.host(), uri.port_u16()) else {
             return Some((
                 RetryResult::Err(make_err!(
                     Code::InvalidArgument,
-                    "Unable to get host from endpoint {uri}"
-                )),
-                endpoint,
-            ));
-        };
-        let Some(port) = uri.port().map(|port| port.as_u16()) else {
-            return Some((
-                RetryResult::Err(make_err!(
-                    Code::InvalidArgument,
-                    "Unable to get port from endpoint {uri}"
+                    "Unable to get host and port from endpoint {uri}"
                 )),
                 endpoint,
             ));
         };
 
-        // `LoadBalancedOptions::default()` leaves this zero; an Eager resolve
-        // with a zero timeout would fail instantly.
-        let connect_timeout = if options.connect_timeout.is_zero() {
-            Duration::from_secs(30)
-        } else {
-            options.connect_timeout
+        let addrs = match tokio::time::timeout(
+            options.connect_timeout(),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        {
+            Err(_elapsed) => {
+                return Some((
+                    RetryResult::Retry(make_err!(
+                        Code::Unavailable,
+                        "DNS resolution of {host}:{port} timed out"
+                    )),
+                    endpoint,
+                ));
+            }
+            Ok(Err(err)) => {
+                return Some((
+                    RetryResult::Retry(make_err!(
+                        Code::Unavailable,
+                        "DNS resolution of {host}:{port} failed: {err:?}"
+                    )),
+                    endpoint,
+                ));
+            }
+            Ok(Ok(addrs)) => {
+                let addrs: Vec<SocketAddr> = addrs.collect();
+                if addrs.is_empty() {
+                    return Some((
+                        RetryResult::Retry(make_err!(
+                            Code::Unavailable,
+                            "DNS resolution of {host}:{port} returned no addresses"
+                        )),
+                        endpoint,
+                    ));
+                }
+                addrs
+            }
         };
-        let mut builder = LoadBalancedChannel::builder((host, port))
-            .connect_timeout(connect_timeout)
-            // Lazy resolution hands back a channel before any address is known,
-            // so requests queue against a backend-less channel. Resolve first
-            // and let the retrier handle a DNS failure instead.
-            .resolution_strategy(ResolutionStrategy::Eager {
-                timeout: connect_timeout,
-            });
-        if !options.request_timeout.is_zero() {
-            builder = builder.timeout(options.request_timeout);
-        }
-        if let Some(tls_config) = options.tls_config.clone() {
-            builder = builder.with_tls(tls_config);
-        }
+        let addr = addrs[NEXT_ADDR.fetch_add(1, Ordering::Relaxed) % addrs.len()];
 
-        let result = builder
-            .channel()
-            .await
-            .map_err(|err| make_err!(Code::Unavailable, "Failed to connect to {uri:?}: {err:?}"));
+        let per_addr_endpoint = match crate::tls_utils::balanced_endpoint(options, addr) {
+            Ok(per_addr_endpoint) => per_addr_endpoint,
+            Err(err) => return Some((RetryResult::Err(err), endpoint)),
+        };
 
         Some((
-            result
-                .map(LoadBalancedChannel::into)
+            per_addr_endpoint
+                .connect()
+                .await
+                .map_err(|err| {
+                    make_err!(
+                        Code::Unavailable,
+                        "Failed to connect to {addr} (resolved from {uri}): {err:?}"
+                    )
+                })
                 .map_or_else(RetryResult::Retry, RetryResult::Ok),
             endpoint,
         ))

@@ -125,8 +125,8 @@ impl GrpcStore {
                 Error::from_std_err(Code::InvalidArgument, &e)
                     .append("Invalid URI for GrpcStore endpoint")
             })?;
-            // ginepro ignores the Endpoint above and builds its own, so the
-            // settings it can honour have to be carried across explicitly.
+            // The balanced path re-resolves DNS per connection and builds
+            // per-address endpoints from the same configuration.
             let balanced_options = if spec.load_balanced_channel {
                 Some(tls_utils::load_balanced_options(
                     endpoint_config,
