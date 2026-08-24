@@ -282,6 +282,12 @@ pub struct GrpcSpec {
     #[serde(default, deserialize_with = "convert_numeric_with_shellexpand")]
     pub connections_per_endpoint: usize,
 
+    /// Re-resolve the endpoint's DNS name on every (re)connect and spread
+    /// the pooled connections (`connections_per_endpoint`) across the
+    /// resolved addresses. Useful with headless Kubernetes services, where
+    /// DNS returns one record per backend pod. Requires an explicit host
+    /// and port in the endpoint address.
+    ///
     /// Default: false
     #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
     pub load_balanced_channel: bool,

@@ -1613,6 +1613,15 @@ pub struct GrpcSpec {
     #[serde(default)]
     pub experimental_read_batching: Option<GrpcReadBatchingConfig>,
 
+    /// Re-resolve the endpoint's DNS name on every (re)connect and spread
+    /// this store's pooled connections (`connections_per_endpoint`) across
+    /// the resolved addresses. Useful with headless Kubernetes services,
+    /// where DNS returns one record per backend pod. Requires an explicit
+    /// host and port in the endpoint address.
+    ///
+    /// All endpoint transport settings (TLS, keepalive, timeouts) apply to
+    /// each connection; TLS validates against the configured hostname.
+    ///
     /// Default: false
     #[serde(default, deserialize_with = "convert_boolean_with_shellexpand")]
     pub load_balanced_channel: bool,
