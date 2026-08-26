@@ -13,6 +13,10 @@
 // limitations under the License.
 
 #![recursion_limit = "256"]
+#![allow(
+    clippy::large_stack_frames,
+    reason = "large async test frames; see RUST_MIN_STACK in .bazelrc"
+)]
 
 use serial_test::serial;
 
