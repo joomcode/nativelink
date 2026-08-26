@@ -186,6 +186,10 @@ test --@rules_rust//:rustfmt.toml=//:.rustfmt.toml
 test --output_groups=+rustfmt_checks
 test --output_groups=+clippy_checks
 
+# Async test bodies build large stack frames in debug builds. The default 2MiB
+# thread stack of the test harness is not enough for some worker tests.
+test --test_env=RUST_MIN_STACK=8388608
+
 # Get a bit more output from bazel tests
 # See https://github.com/bazelbuild/bazel/issues/12602
 test --experimental_ui_max_stdouterr_bytes=104857600
