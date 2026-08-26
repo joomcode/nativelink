@@ -126,6 +126,38 @@ wrapped with `cache_metrics`; configuring OTEL alone doesn't enable them.
 - `success`: Operation completed (writes/deletes)
 - `error`: Operation failed
 
+### Store Churn Metrics
+
+Store churn metrics are always on. They are emitted for every store that holds
+its own cache: `memory`, `filesystem`, and `existence_cache`. Stores that evict
+outside the process, for example `redis` and the cloud object stores, report
+nothing here.
+
+| Metric | Type | Description | Labels |
+|--------|------|-------------|--------|
+| `nativelink_store_evictions_total` | Counter | Items removed from a store | `store_name`, `store_type`, `store_eviction_reason` |
+| `nativelink_store_evicted_bytes_total` | Counter | Bytes removed from a store | `store_name`, `store_type`, `store_eviction_reason` |
+| `nativelink_store_inserted_bytes_total` | Counter | Bytes inserted since start | `store_name`, `store_type` |
+| `nativelink_store_current_bytes` | Gauge | Current size of the live items | `store_name`, `store_type` |
+| `nativelink_store_current_items` | Gauge | Current number of live items | `store_name`, `store_type` |
+
+**Eviction Reasons:**
+- `capacity`: the item was dropped by capacity or timeout pressure. This is churn.
+- `replaced`: an insert overwrote the same key. A re-upload of the same digest lands here.
+
+`store_name` is the store name from the configuration file. A store nested
+inside another store reports the name of the outermost store. If one name holds
+two stores of the same type, for example the index store and the content store
+of a dedup store, their counters are summed.
+
+Filter churn queries on `store_eviction_reason="capacity"`. Without that
+filter a busy CI looks like a thrashing cache, because every re-upload of the
+same digest counts as a replacement.
+
+For an `existence_cache` store the byte counters are the sizes of the objects
+that the cache tracks, not bytes held on the node. The item counters are exact
+for every store type.
+
 ### Execution Metrics
 
 | Metric | Type | Description | Labels |
@@ -281,6 +313,18 @@ exporters:
 ```promql
 sum(rate(nativelink_cache_operations_total{cache_operation_result="hit"}[5m])) by (cache_type) /
 sum(rate(nativelink_cache_operations_total{cache_operation_name="read"}[5m])) by (cache_type)
+```
+
+**Cache churn per store (fraction of the store replaced per second):**
+```promql
+sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason="capacity"}[5m])) by (store_name, store_type) /
+sum(nativelink_store_current_bytes) by (store_name, store_type)
+```
+
+**Evicted bytes per inserted byte (above 1 the store is too small):**
+```promql
+sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason="capacity"}[5m])) by (store_name) /
+sum(rate(nativelink_store_inserted_bytes_total[5m])) by (store_name)
 ```
 
 **Execution success rate:**

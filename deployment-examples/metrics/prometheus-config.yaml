@@ -143,10 +143,12 @@ groups:
         expr: |
           sum(nativelink_cache_size) by (cache_type, instance_name)
 
-      # Cache eviction rate
-      - record: nativelink:cache_eviction_rate
+      # Store churn: the share of a store that capacity pressure replaces per
+      # second. A replacement of the same key is not churn.
+      - record: nativelink:store_churn_rate
         expr: |
-          sum(rate(nativelink_cache_operations_total{cache_operation_name="evict"}[5m])) by (cache_type)
+          sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason="capacity"}[5m])) by (store_name, store_type) /
+          sum(nativelink_store_current_bytes) by (store_name, store_type)
 
   - name: nativelink_performance
     interval: 60s

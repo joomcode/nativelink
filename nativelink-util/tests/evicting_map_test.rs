@@ -24,6 +24,7 @@ use nativelink_macro::nativelink_test;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::evicting_map::{EvictingMap, LenEntry};
 use nativelink_util::instant_wrapper::MockInstantWrapped;
+use nativelink_util::metrics::{StoreType, register_churn_source};
 use pretty_assertions::assert_eq;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -874,6 +875,64 @@ async fn snapshot_display_info() -> Result<(), Error> {
     assert_eq!(
         format!("{snapshot}"),
         "Bytes: 3 of 11 (27.273%); Items: 1 of 6 (16.667%); Timeout: unlimited"
+    );
+    Ok(())
+}
+
+/// The churn metrics read these counters, so eviction under capacity pressure
+/// must not be reported as a replacement, and the other way round.
+#[nativelink_test]
+async fn snapshot_separates_eviction_from_replacement() -> Result<(), Error> {
+    const DATA: &str = "1234";
+
+    let evicting_map = EvictingMap::<String, String, BytesWrapper, MockInstantWrapped>::new(
+        &EvictionPolicy {
+            max_count: 0,
+            max_seconds: 0,
+            max_bytes: 12,
+            evict_bytes: 0,
+        },
+        MockInstantWrapped::default(),
+    );
+
+    // Overwrite one key. This is a replacement, not churn.
+    evicting_map
+        .insert("key-1".into(), Bytes::from(DATA).into())
+        .await;
+    evicting_map
+        .insert("key-1".into(), Bytes::from(DATA).into())
+        .await;
+
+    let snapshot = evicting_map.get_snapshot();
+    assert_eq!(snapshot.replaced_items(), 1);
+    assert_eq!(snapshot.replaced_bytes(), 4);
+    assert_eq!(snapshot.evicted_items(), 0);
+    assert_eq!(snapshot.evicted_bytes(), 0);
+    assert_eq!(snapshot.inserted_bytes(), 8);
+
+    // Fill the store past max_bytes. This is churn.
+    evicting_map
+        .insert("key-2".into(), Bytes::from(DATA).into())
+        .await;
+    evicting_map
+        .insert("key-3".into(), Bytes::from(DATA).into())
+        .await;
+
+    let snapshot = evicting_map.get_snapshot();
+    assert_eq!(snapshot.evicted_items(), 1);
+    assert_eq!(snapshot.evicted_bytes(), 4);
+    assert_eq!(snapshot.replaced_items(), 1);
+    assert_eq!(snapshot.current_items(), 2);
+    assert_eq!(snapshot.current_bytes(), 8);
+    assert_eq!(snapshot.inserted_bytes(), 16);
+
+    // Registering the map builds the churn instruments. A bad instrument
+    // definition fails here instead of at the first metrics collection.
+    let evicting_map = Arc::new(evicting_map);
+    register_churn_source(
+        StoreType::Memory,
+        "churn_test_store",
+        Box::new(move || evicting_map.get_snapshot()),
     );
     Ok(())
 }
