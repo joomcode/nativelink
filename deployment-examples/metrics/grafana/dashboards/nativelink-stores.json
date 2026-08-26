@@ -1416,6 +1416,235 @@
       ],
       "title": "Write Latency Distribution",
       "type": "heatmap"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "id": 21,
+      "panels": [],
+      "title": "Cache Churn",
+      "type": "row"
+    },
+    {
+      "description": "Bytes evicted by capacity or timeout pressure, divided by the current size of the store. 1 means the whole store is replaced every hour. Replacements of the same key are excluded.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "smooth",
+            "spanNulls": true
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 63
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason=\\\"capacity\\\", store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name, store_type) * 3600\n/\nsum(nativelink_store_current_bytes{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}) by (store_name, store_type)",
+          "legendFormat": "{{store_name}} ({{store_type}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Churn Rate by Store (share of the store evicted per hour)",
+      "type": "timeseries"
+    },
+    {
+      "description": "When the evicted rate reaches the inserted rate, the store cannot hold the working set of the build.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "smooth",
+            "spanNulls": true
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 63
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason=\\\"capacity\\\", store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name)",
+          "legendFormat": "evicted {{store_name}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(nativelink_store_inserted_bytes_total{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name)",
+          "legendFormat": "inserted {{store_name}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Evicted vs Inserted Bytes",
+      "type": "timeseries"
+    },
+    {
+      "description": "Items removed per second. The reason capacity is churn. The reason replaced is an insert that overwrote the same key, for example a re-upload of the same digest.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "smooth",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 71
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(nativelink_store_evictions_total{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name, store_eviction_reason)",
+          "legendFormat": "{{store_name}} {{store_eviction_reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evictions per Second by Reason",
+      "type": "timeseries"
+    },
+    {
+      "description": "Current total size of the live items in each store.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "smooth",
+            "spanNulls": true
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 71
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(nativelink_store_current_bytes{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}) by (store_name, store_type)",
+          "legendFormat": "{{store_name}} ({{store_type}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Store Fill",
+      "type": "timeseries"
     }
   ],
   "preload": false,
@@ -1446,14 +1675,14 @@
         "allValue": ".*",
         "current": { "selected": true, "text": "All", "value": "$__all" },
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "definition": "label_values(nativelink_store_operations_total, service_namespace)",
+        "definition": "label_values(nativelink_store_current_items, service_namespace)",
         "hide": 0,
         "includeAll": true,
         "label": "Instance",
         "multi": true,
         "name": "instance",
         "options": [],
-        "query": { "qryType": 1, "query": "label_values(nativelink_store_operations_total, service_namespace)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "query": { "qryType": 1, "query": "label_values(nativelink_store_current_items, service_namespace)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
         "refresh": 2,
         "regex": "/^nativelink.*/",
         "skipUrlSync": false,
@@ -1469,14 +1698,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(nativelink_store_operations_total, store_type)",
+        "definition": "label_values(nativelink_store_current_items, store_type)",
         "includeAll": true,
         "label": "Store Type",
         "multi": true,
         "name": "store_type",
         "options": [],
         "query": {
-          "query": "label_values(nativelink_store_operations_total, store_type)",
+          "query": "label_values(nativelink_store_current_items, store_type)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -1493,14 +1722,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\"}, store_name)",
+        "definition": "label_values(nativelink_store_current_items{store_type=~\"$store_type\", service_namespace=~\"$instance\"}, store_name)",
         "includeAll": true,
         "label": "Store Name",
         "multi": true,
         "name": "store_name",
         "options": [],
         "query": {
-          "query": "label_values(nativelink_store_operations_total{store_type=~\"$store_type\", service_namespace=~\"$instance\"}, store_name)",
+          "query": "label_values(nativelink_store_current_items{store_type=~\"$store_type\", service_namespace=~\"$instance\"}, store_name)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -1518,5 +1747,5 @@
   "timezone": "browser",
   "title": "NativeLink Stores",
   "uid": "nativelink-stores",
-  "version": 4
+  "version": 5
 }
