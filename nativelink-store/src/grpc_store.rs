@@ -191,6 +191,60 @@ const fn is_retryable_code(code: Code) -> bool {
     )
 }
 
+/// Bounds one `Stream::next` on a gRPC response stream. On a pooled h2
+/// connection whose flow-control window was exhausted by other stalled
+/// streams, the transport never errors — the read just silently stops
+/// producing chunks. The timeout turns that freeze into `DeadlineExceeded`
+/// so the caller can retry on another connection instead of pinning its
+/// connection permit forever. `Duration::ZERO` disables the bound.
+async fn next_with_timeout<S>(
+    stream: &mut S,
+    timeout: Duration,
+    ctx: &'static str,
+) -> Result<Option<S::Item>, Error>
+where
+    S: Stream + Unpin + Send,
+{
+    if timeout.is_zero() {
+        return Ok(stream.next().await);
+    }
+    match tokio::time::timeout(timeout, stream.next()).await {
+        Ok(item) => Ok(item),
+        Err(_elapsed) => Err(make_err!(
+            Code::DeadlineExceeded,
+            "{ctx}: no data from upstream for {}s",
+            timeout.as_secs()
+        )),
+    }
+}
+
+/// Bounds one `DropCloserWriteHalf::send` toward the downstream consumer.
+/// A consumer that stays connected but stops reading (an interrupted
+/// client, a worker being drained) blocks this send indefinitely; the
+/// blocked read chain then pins an upstream connection permit and parks
+/// unacknowledged data against the shared h2 connection window, freezing
+/// unrelated streams on the same connection. Failing the transfer after
+/// `timeout` of zero progress releases both. `Duration::ZERO` disables
+/// the bound.
+async fn send_with_timeout(
+    writer: &mut DropCloserWriteHalf,
+    data: Bytes,
+    timeout: Duration,
+    ctx: &'static str,
+) -> Result<(), Error> {
+    if timeout.is_zero() {
+        return writer.send(data).await;
+    }
+    match tokio::time::timeout(timeout, writer.send(data)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(make_err!(
+            Code::DeadlineExceeded,
+            "{ctx}: downstream consumer accepted no data for {}s",
+            timeout.as_secs()
+        )),
+    }
+}
+
 // This store is usually a pass-through store, but can also be used as a CAS store. Using it as an
 // AC store has one major side-effect... The has() function may not give the proper size of the
 // underlying data. This might cause issues if embedded in certain stores.
@@ -201,7 +255,9 @@ pub struct GrpcStore {
     store_type: nativelink_config::stores::StoreType,
     retrier: Retrier,
     connection_manager: ConnectionManager,
-    /// Per-RPC timeout. `Duration::ZERO` means disabled.
+    /// Per-RPC timeout. Bounds whole unary RPCs and stream establishment,
+    /// inter-chunk gaps on read streams, and per-send progress toward the
+    /// downstream consumer. `Duration::ZERO` means disabled.
     rpc_timeout: Duration,
     use_legacy_resource_names: bool,
     headers: Vec<(MetadataKey<Ascii>, MetadataValue<Ascii>)>,
@@ -313,6 +369,28 @@ impl GrpcStore {
         }))
     }
 
+    /// Applies the configured `rpc_timeout_s` to a whole RPC future. This
+    /// bounds unary calls and stream establishment on a frozen pooled
+    /// connection, where the transport itself never errors (see
+    /// `next_with_timeout`). `Duration::ZERO` disables it.
+    async fn with_rpc_timeout<T, Fut>(&self, ctx: &'static str, fut: Fut) -> Result<T, Error>
+    where
+        Fut: Future<Output = Result<T, Error>> + Send,
+        T: Send,
+    {
+        if self.rpc_timeout.is_zero() {
+            return fut.await;
+        }
+        match tokio::time::timeout(self.rpc_timeout, fut).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(make_err!(
+                Code::DeadlineExceeded,
+                "{ctx} timed out after {}s",
+                self.rpc_timeout.as_secs()
+            )),
+        }
+    }
+
     async fn perform_request<F, Fut, R, I>(&self, input: I, mut request: F) -> Result<R, Error>
     where
         F: FnMut(I) -> Fut + Send + Copy,
@@ -324,7 +402,10 @@ impl GrpcStore {
             .retry(unfold(input, move |input| async move {
                 let input_clone = input.clone();
                 Some((
-                    request(input_clone)
+                    // `DeadlineExceeded` is retryable, so a request that
+                    // hung on a frozen connection gets another attempt on
+                    // a (likely) different pooled connection.
+                    self.with_rpc_timeout("GrpcStore RPC", request(input_clone))
                         .await
                         .map_or_else(RetryResult::Retry, RetryResult::Ok),
                     input,
@@ -1326,11 +1407,14 @@ impl GrpcStore {
         };
 
         let mut stream = match self
-            .read_internal(ReadRequest {
-                resource_name,
-                read_offset: 0,
-                read_limit: 0,
-            })
+            .with_rpc_timeout(
+                "GrpcStore::get_part_compressed() read start",
+                self.read_internal(ReadRequest {
+                    resource_name,
+                    read_offset: 0,
+                    read_limit: 0,
+                }),
+            )
             .await
         {
             Ok(stream) => stream,
@@ -1358,7 +1442,17 @@ impl GrpcStore {
         );
         let feed_fut = async {
             loop {
-                match stream.next().await {
+                // A timeout here means the connection silently stopped
+                // producing; `?` surfaces it as a retryable error, which
+                // (with nothing forwarded yet) falls back to the identity
+                // read path and its own retry machinery.
+                match next_with_timeout(
+                    &mut stream,
+                    self.rpc_timeout,
+                    "GrpcStore::get_part_compressed()",
+                )
+                .await?
+                {
                     None => {
                         // A send_eof failure means the decoder already
                         // settled and dropped its receiver; its result is
@@ -1397,10 +1491,14 @@ impl GrpcStore {
                         .err_tip(|| "in GrpcStore::get_part_compressed()");
                 }
                 forwarded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                writer
-                    .send(chunk)
-                    .await
-                    .err_tip(|| "in GrpcStore::get_part_compressed()")?;
+                send_with_timeout(
+                    writer,
+                    chunk,
+                    self.rpc_timeout,
+                    "GrpcStore::get_part_compressed()",
+                )
+                .await
+                .err_tip(|| "in GrpcStore::get_part_compressed()")?;
             }
         };
 
@@ -1755,7 +1853,10 @@ impl StoreDriver for GrpcStore {
                     read_limit: local_state.read_limit,
                 };
                 let mut stream = match self
-                    .read_internal(request)
+                    .with_rpc_timeout(
+                        "GrpcStore::get_part() read start",
+                        self.read_internal(request),
+                    )
                     .await
                     .err_tip(|| "in GrpcStore::get_part()")
                 {
@@ -1764,11 +1865,17 @@ impl StoreDriver for GrpcStore {
                 };
 
                 loop {
-                    let data = match stream.next().await {
+                    let data = match next_with_timeout(
+                        &mut stream,
+                        self.rpc_timeout,
+                        "GrpcStore::get_part()",
+                    )
+                    .await
+                    {
                         // Create an empty response to represent EOF.
-                        None => Bytes::new(),
-                        Some(Ok(message)) => message.data,
-                        Some(Err(status)) => {
+                        Ok(None) => Bytes::new(),
+                        Ok(Some(Ok(message))) => message.data,
+                        Ok(Some(Err(status))) => {
                             return Some((
                                 RetryResult::Retry(
                                     Into::<Error>::into(status)
@@ -1777,6 +1884,10 @@ impl StoreDriver for GrpcStore {
                                 local_state,
                             ));
                         }
+                        // The connection silently stopped producing; the
+                        // retry resumes from `read_offset`, most likely on
+                        // another pooled connection.
+                        Err(err) => return Some((RetryResult::Retry(err), local_state)),
                     };
                     let length = data.len().try_into().unwrap_or(i64::MAX);
 
@@ -1789,12 +1900,19 @@ impl StoreDriver for GrpcStore {
                             .map_or_else(RetryResult::Err, RetryResult::Ok);
                         return Some((eof_result, local_state));
                     }
-                    // Forward the data upstream.
-                    if let Err(err) = local_state
-                        .writer
-                        .send(data)
-                        .await
-                        .err_tip(|| "While sending in GrpcStore::get_part()")
+                    // Forward the data upstream. A stalled downstream is
+                    // not recoverable by retrying the upstream read, so a
+                    // progress timeout here is a terminal error — what
+                    // matters is releasing the connection permit and the
+                    // upstream stream.
+                    if let Err(err) = send_with_timeout(
+                        local_state.writer,
+                        data,
+                        self.rpc_timeout,
+                        "GrpcStore::get_part()",
+                    )
+                    .await
+                    .err_tip(|| "While sending in GrpcStore::get_part()")
                     {
                         return Some((RetryResult::Err(err), local_state));
                     }

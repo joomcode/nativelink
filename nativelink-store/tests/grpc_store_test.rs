@@ -198,6 +198,145 @@ async fn make_fake_bytestream_server() -> (FakeStreamServer, u16) {
     (fake_stream_server, port)
 }
 
+/// A `ByteStream` server for simulating the two ways a read can wedge on a
+/// healthy connection: the upstream silently stops producing chunks
+/// (`flood: false`, first request only), or the downstream consumer stops
+/// reading while the server keeps producing (`flood: true`).
+#[derive(Debug)]
+struct StallingReadServer {
+    read_requests: Arc<Mutex<Vec<ReadRequest>>>,
+    flood: bool,
+}
+
+#[tonic::async_trait]
+impl ByteStream for StallingReadServer {
+    type ReadStream = ReadStream;
+
+    async fn read(
+        &self,
+        grpc_request: Request<ReadRequest>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        let request = grpc_request.into_inner();
+        let mut requests = self.read_requests.lock().await;
+        let is_first = requests.is_empty();
+        requests.push(request);
+        drop(requests);
+
+        if self.flood {
+            let stream = futures::stream::repeat_with(|| {
+                Ok(ReadResponse {
+                    data: vec![0u8; 1024].into(),
+                })
+            });
+            return Ok(Response::new(Box::pin(stream)));
+        }
+        if is_first {
+            // One chunk, then silence — like a stream on a connection whose
+            // flow-control window was exhausted by other streams.
+            let stream = futures::stream::iter([Ok(ReadResponse {
+                data: RAW_INPUT.as_bytes().into(),
+            })])
+            .chain(futures::stream::pending());
+            return Ok(Response::new(Box::pin(stream)));
+        }
+        // The retried request (resuming past the delivered chunk) gets a
+        // clean immediate EOF.
+        Ok(Response::new(Box::pin(futures::stream::empty())))
+    }
+
+    async fn write(
+        &self,
+        _grpc_request: Request<Streaming<WriteRequest>>,
+    ) -> Result<Response<WriteResponse>, Status> {
+        Err(Status::unimplemented("not needed for this test"))
+    }
+
+    async fn query_write_status(
+        &self,
+        _grpc_request: Request<QueryWriteStatusRequest>,
+    ) -> Result<Response<QueryWriteStatusResponse>, Status> {
+        Err(Status::unimplemented("not needed for this test"))
+    }
+}
+
+async fn spawn_bytestream_server<S: ByteStream>(svc: S) -> u16 {
+    let listener = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = ByteStreamServer::new(svc);
+    background_spawn!("server", async move {
+        Server::builder()
+            .add_service(server)
+            .serve_with_incoming(listener)
+            .await
+            .unwrap();
+    });
+    port
+}
+
+/// A read stream that silently stops producing must not hang forever:
+/// `rpc_timeout_s` bounds the inter-chunk gap and the retry resumes at the
+/// current offset on a fresh stream.
+#[nativelink_test]
+async fn read_stalled_mid_stream_recovers_via_timeout() -> Result<(), Error> {
+    let read_requests = Arc::new(Mutex::new(vec![]));
+    let port = spawn_bytestream_server(StallingReadServer {
+        read_requests: read_requests.clone(),
+        flood: false,
+    })
+    .await;
+    let mut spec = test_spec(format!("http://localhost:{port}"), false);
+    spec.retry = Retry {
+        max_retries: 2,
+        delay: 0.05,
+        jitter: 0.0,
+        retry_on_errors: None,
+    };
+    let store = GrpcStore::new(&spec).await?;
+    let digest = DigestInfo::try_new(VALID_HASH, RAW_INPUT.len()).unwrap();
+
+    let (tx, mut rx) = make_buf_channel_pair();
+    timeout(Duration::from_secs(10), store.get_part(digest, tx, 0, None))
+        .await
+        .expect("get_part hung on a silently stalled stream")?;
+    let bytes = rx.recv().await?;
+    assert_eq!(bytes, RAW_INPUT.as_bytes());
+
+    let read_requests = read_requests.lock().await;
+    assert_eq!(read_requests.len(), 2, "expected a retry after the stall");
+    assert_eq!(
+        read_requests[1].read_offset,
+        i64::try_from(RAW_INPUT.len()).unwrap(),
+        "retry must resume after the already-delivered chunk"
+    );
+    Ok(())
+}
+
+/// A downstream consumer that stops reading must fail the transfer after
+/// `rpc_timeout_s` instead of blocking the forwarding loop forever (which
+/// pins a connection permit and parks data against the shared h2
+/// connection window).
+#[nativelink_test]
+async fn read_with_stalled_consumer_fails_instead_of_hanging() -> Result<(), Error> {
+    let port = spawn_bytestream_server(StallingReadServer {
+        read_requests: Arc::new(Mutex::new(vec![])),
+        flood: true,
+    })
+    .await;
+    let spec = test_spec(format!("http://localhost:{port}"), false);
+    let store = GrpcStore::new(&spec).await?;
+    let digest = DigestInfo::try_new(VALID_HASH, 1_000_000).unwrap();
+
+    let (tx, rx) = make_buf_channel_pair();
+    // `rx` is deliberately never read.
+    let result = timeout(Duration::from_secs(10), store.get_part(digest, tx, 0, None))
+        .await
+        .expect("get_part hung on a consumer that stopped reading");
+    drop(rx);
+    let err = result.expect_err("expected the stalled transfer to fail");
+    assert_eq!(err.code, nativelink_error::Code::DeadlineExceeded);
+    Ok(())
+}
+
 async fn write_update_works_core(
     use_legacy_resource_names: bool,
     upload_pattern: Regex,

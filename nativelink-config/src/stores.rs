@@ -1546,12 +1546,25 @@ pub struct GrpcSpec {
     #[serde(default, deserialize_with = "convert_numeric_with_shellexpand")]
     pub connections_per_endpoint: usize,
 
-    /// Maximum time (seconds) allowed for a single RPC request (e.g. a
-    /// `ByteStream.Write` call) before it is cancelled.
+    /// Maximum time (seconds) an RPC may go without making progress before
+    /// it is cancelled. Applied as:
+    /// - a whole-call timeout for unary RPCs, stream establishment, and
+    ///   full `ByteStream.Write` calls;
+    /// - an inter-chunk idle timeout on `ByteStream.Read` streams (the
+    ///   total transfer may take longer, each chunk must arrive within
+    ///   this bound; timed-out reads are retried and resume at the current
+    ///   offset);
+    /// - a progress timeout on forwarding read data to the downstream
+    ///   consumer (a consumer that accepts nothing for this long fails the
+    ///   transfer instead of pinning a connection permit forever).
     ///
-    /// A value of 0 (the default) disables the per-RPC timeout. Dead
-    /// connections are still detected by the HTTP/2 and TCP keepalive
-    /// mechanisms configured on each endpoint.
+    /// This is what recovers requests stuck on an HTTP/2 connection whose
+    /// flow-control window was exhausted by other stalled streams — a
+    /// state keepalive cannot detect, because both peers are healthy.
+    ///
+    /// A value of 0 (the default) disables all of these. Dead connections
+    /// are still detected by the HTTP/2 and TCP keepalive mechanisms
+    /// configured on each endpoint.
     ///
     /// For large uploads (multi-GB), either leave this at 0 or set it
     /// large enough to accommodate the full transfer time.

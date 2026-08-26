@@ -242,6 +242,18 @@ pub fn balanced_endpoint(
     Ok(endpoint)
 }
 
+/// HTTP/2 flow-control windows for client connections. A stream whose
+/// consumer stops reading parks up to a full stream window of
+/// unacknowledged data against the shared connection window; once the
+/// connection window is exhausted, every other stream on that pooled
+/// connection freezes (head-of-line blocking) with no error from the
+/// transport. With hyper's defaults (2 MiB stream / 5 MiB connection)
+/// fewer than three parked streams freeze a connection. Keep the stream
+/// window at 2 MiB but give the connection a 16-stream budget so isolated
+/// stalled consumers cannot take the whole connection down with them.
+const HTTP2_STREAM_WINDOW_SIZE: u32 = 2 * 1024 * 1024;
+const HTTP2_CONNECTION_WINDOW_SIZE: u32 = 32 * 1024 * 1024;
+
 const fn connect_timeout(endpoint_config: &GrpcEndpoint) -> Duration {
     if endpoint_config.connect_timeout_s > 0 {
         Duration::from_secs(endpoint_config.connect_timeout_s)
@@ -279,7 +291,9 @@ fn apply_transport_settings(
         .tcp_keepalive(Some(tcp_keepalive))
         .http2_keep_alive_interval(http2_keepalive_interval)
         .keep_alive_timeout(http2_keepalive_timeout)
-        .keep_alive_while_idle(true);
+        .keep_alive_while_idle(true)
+        .initial_stream_window_size(HTTP2_STREAM_WINDOW_SIZE)
+        .initial_connection_window_size(HTTP2_CONNECTION_WINDOW_SIZE);
 
     if let Some(concurrency_limit) = endpoint_config.concurrency_limit {
         endpoint = endpoint.concurrency_limit(concurrency_limit);
