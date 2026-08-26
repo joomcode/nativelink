@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(
+    clippy::large_stack_frames,
+    reason = "large async test frames; see RUST_MIN_STACK in .bazelrc"
+)]
+
 use serial_test::serial;
 
 #[serial]
