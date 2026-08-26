@@ -229,6 +229,55 @@ pub struct EvictionSnapshot {
     max_items: u64,
     current_items: usize,
     max_seconds: i32,
+    evicted_items: u64,
+    evicted_bytes: u64,
+    replaced_items: u64,
+    replaced_bytes: u64,
+    inserted_bytes: u64,
+}
+
+impl EvictionSnapshot {
+    /// Current total size of the live items, in bytes.
+    #[must_use]
+    pub const fn current_bytes(&self) -> u64 {
+        self.current_bytes
+    }
+
+    /// Current number of live items.
+    #[must_use]
+    pub const fn current_items(&self) -> usize {
+        self.current_items
+    }
+
+    /// Items removed by capacity or timeout pressure since the map was created.
+    #[must_use]
+    pub const fn evicted_items(&self) -> u64 {
+        self.evicted_items
+    }
+
+    /// Bytes removed by capacity or timeout pressure since the map was created.
+    #[must_use]
+    pub const fn evicted_bytes(&self) -> u64 {
+        self.evicted_bytes
+    }
+
+    /// Items overwritten by an insert of the same key.
+    #[must_use]
+    pub const fn replaced_items(&self) -> u64 {
+        self.replaced_items
+    }
+
+    /// Bytes overwritten by an insert of the same key.
+    #[must_use]
+    pub const fn replaced_bytes(&self) -> u64 {
+        self.replaced_bytes
+    }
+
+    /// Bytes inserted since the map was created.
+    #[must_use]
+    pub const fn inserted_bytes(&self) -> u64 {
+        self.inserted_bytes
+    }
 }
 
 impl Display for EvictionSnapshot {
@@ -373,6 +422,11 @@ where
             max_items: self.max_count,
             current_items: state.lru.len(),
             max_seconds: self.max_seconds,
+            evicted_items: state.evicted_items.get(),
+            evicted_bytes: state.evicted_bytes.get(),
+            replaced_items: state.replaced_items.get(),
+            replaced_bytes: state.replaced_bytes.get(),
+            inserted_bytes: state.lifetime_inserted_bytes.get(),
         }
     }
 

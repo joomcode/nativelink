@@ -20,8 +20,10 @@ use std::sync::{LazyLock, OnceLock};
 
 use nativelink_error::{Code, make_err};
 use opentelemetry::{InstrumentationScope, KeyValue, Value, global, metrics};
+use parking_lot::Mutex;
 
 use crate::action_messages::ActionStage;
+use crate::evicting_map::EvictionSnapshot;
 
 /// Callback type for observable gauges that report queued action counts.
 /// The callback receives an `Observer` that should be used to record values with attributes.
@@ -1902,16 +1904,6 @@ pub static STORE_METRICS: LazyLock<StoreMetrics> = LazyLock::new(|| {
                 10000.0, // 10 seconds
             ])
             .build(),
-
-        eviction_count: meter
-            .u64_counter("eviction_count")
-            .with_description("Number of evictions")
-            .build(),
-
-        store_size: meter
-            .u64_gauge("store_size")
-            .with_description("Number of items in the store")
-            .build(),
     }
 });
 
@@ -1921,10 +1913,6 @@ pub struct StoreMetrics {
     pub store_operation_duration: metrics::Histogram<f64>,
     /// Counter of store operations by type and result
     pub store_operations: metrics::Counter<u64>,
-    /// Counter of evictions
-    pub eviction_count: metrics::Counter<u64>,
-    /// Counter of items in the store
-    pub store_size: metrics::Gauge<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1936,8 +1924,6 @@ pub struct StoreMetricAttrs {
     read_error: Vec<KeyValue>,
     write_success: Vec<KeyValue>,
     write_error: Vec<KeyValue>,
-    eviction: Vec<KeyValue>,
-    store_size: Vec<KeyValue>,
 }
 
 impl StoreMetricAttrs {
@@ -1966,8 +1952,6 @@ impl StoreMetricAttrs {
             read_error: make_attrs(CacheOperationName::Read, CacheOperationResult::Error),
             write_success: make_attrs(CacheOperationName::Write, CacheOperationResult::Success),
             write_error: make_attrs(CacheOperationName::Write, CacheOperationResult::Error),
-            eviction: make_attrs(CacheOperationName::Evict, CacheOperationResult::Success),
-            store_size: base_attrs.clone(),
         }
     }
 
@@ -1996,14 +1980,186 @@ impl StoreMetricAttrs {
     pub fn write_error(&self) -> &[KeyValue] {
         &self.write_error
     }
-    #[must_use]
-    pub fn eviction(&self) -> &[KeyValue] {
-        &self.eviction
+}
+
+/// Metric attribute key for why an item left a store.
+pub const STORE_EVICTION_REASON: &str = "store.eviction.reason";
+
+/// [`STORE_EVICTION_REASON`] value for capacity or timeout pressure. This is
+/// the churn a store that is too small causes.
+pub const EVICTION_REASON_CAPACITY: &str = "capacity";
+
+/// [`STORE_EVICTION_REASON`] value for an insert that overwrote the same key.
+/// A re-upload of the same digest lands here, not in `capacity`.
+pub const EVICTION_REASON_REPLACED: &str = "replaced";
+
+/// Reads the current eviction counters of one store.
+pub type ChurnSnapshotFn = Box<dyn Fn() -> EvictionSnapshot + Send + Sync>;
+
+/// The summed counters of every store that shares one attribute set.
+#[derive(Debug, Default)]
+struct ChurnTotals {
+    evicted_items: u64,
+    evicted_bytes: u64,
+    replaced_items: u64,
+    replaced_bytes: u64,
+    inserted_bytes: u64,
+    current_bytes: u64,
+    current_items: u64,
+}
+
+/// One attribute set, with the stores it reports.
+///
+/// A config can nest two stores of the same type under one name, for example
+/// the index store and the content store of a dedup store. Those share an
+/// attribute set, so their counters are summed. Reporting them separately
+/// would drop all but one of them.
+struct ChurnSource {
+    base: Vec<KeyValue>,
+    capacity: Vec<KeyValue>,
+    replaced: Vec<KeyValue>,
+    snapshots: Vec<ChurnSnapshotFn>,
+}
+
+impl core::fmt::Debug for ChurnSource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ChurnSource")
+            .field("base", &self.base)
+            .field("stores", &self.snapshots.len())
+            .finish()
     }
-    #[must_use]
-    pub fn store_size(&self) -> &[KeyValue] {
-        &self.store_size
+}
+
+impl ChurnSource {
+    fn totals(&self) -> ChurnTotals {
+        let mut totals = ChurnTotals::default();
+        for snapshot in &self.snapshots {
+            let snapshot = snapshot();
+            totals.evicted_items += snapshot.evicted_items();
+            totals.evicted_bytes += snapshot.evicted_bytes();
+            totals.replaced_items += snapshot.replaced_items();
+            totals.replaced_bytes += snapshot.replaced_bytes();
+            totals.inserted_bytes += snapshot.inserted_bytes();
+            totals.current_bytes += snapshot.current_bytes();
+            totals.current_items += snapshot.current_items() as u64;
+        }
+        totals
     }
+}
+
+/// Every store that owns an eviction policy, registered by the store factory.
+static CHURN_SOURCES: LazyLock<Mutex<Vec<ChurnSource>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Reports the cache churn of every registered store.
+///
+/// The numbers come from counters that `EvictingMap` already keeps, so nothing
+/// is recorded on the eviction path itself. The callbacks run when the
+/// OpenTelemetry SDK collects.
+///
+/// Retained only to keep the instruments and their callbacks alive.
+#[derive(Debug)]
+struct ChurnMetrics {
+    _evictions: metrics::ObservableCounter<u64>,
+    _evicted_bytes: metrics::ObservableCounter<u64>,
+    _inserted_bytes: metrics::ObservableCounter<u64>,
+    _current_bytes: metrics::ObservableGauge<u64>,
+    _current_items: metrics::ObservableGauge<u64>,
+}
+
+static CHURN_METRICS: LazyLock<ChurnMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    ChurnMetrics {
+        _evictions: meter
+            .u64_observable_counter("store_evictions")
+            .with_description("Items removed from a store, by reason")
+            .with_unit("{entry}")
+            .with_callback(|observer| {
+                for source in CHURN_SOURCES.lock().iter() {
+                    let totals = source.totals();
+                    observer.observe(totals.evicted_items, &source.capacity);
+                    observer.observe(totals.replaced_items, &source.replaced);
+                }
+            })
+            .build(),
+
+        _evicted_bytes: meter
+            .u64_observable_counter("store_evicted_bytes")
+            .with_description("Bytes removed from a store, by reason")
+            .with_unit("By")
+            .with_callback(|observer| {
+                for source in CHURN_SOURCES.lock().iter() {
+                    let totals = source.totals();
+                    observer.observe(totals.evicted_bytes, &source.capacity);
+                    observer.observe(totals.replaced_bytes, &source.replaced);
+                }
+            })
+            .build(),
+
+        _inserted_bytes: meter
+            .u64_observable_counter("store_inserted_bytes")
+            .with_description("Bytes inserted into a store since it was created")
+            .with_unit("By")
+            .with_callback(|observer| {
+                for source in CHURN_SOURCES.lock().iter() {
+                    observer.observe(source.totals().inserted_bytes, &source.base);
+                }
+            })
+            .build(),
+
+        _current_bytes: meter
+            .u64_observable_gauge("store_current_bytes")
+            .with_description("Current total size of the items in a store")
+            .with_unit("By")
+            .with_callback(|observer| {
+                for source in CHURN_SOURCES.lock().iter() {
+                    observer.observe(source.totals().current_bytes, &source.base);
+                }
+            })
+            .build(),
+
+        _current_items: meter
+            .u64_observable_gauge("store_current_items")
+            .with_description("Current number of items in a store")
+            .with_unit("{entry}")
+            .with_callback(|observer| {
+                for source in CHURN_SOURCES.lock().iter() {
+                    observer.observe(source.totals().current_items, &source.base);
+                }
+            })
+            .build(),
+    }
+});
+
+/// Reports the cache churn of one named store.
+///
+/// Call this once per store, at startup. The `snapshot` function runs on every
+/// metrics collection, so it must only read counters.
+pub fn register_churn_source(store_type: StoreType, name: &str, snapshot: ChurnSnapshotFn) {
+    let base = vec![
+        KeyValue::new(STORE_TYPE, store_type.to_string()),
+        KeyValue::new(STORE_NAME, name.to_string()),
+    ];
+    {
+        let mut sources = CHURN_SOURCES.lock();
+        if let Some(source) = sources.iter_mut().find(|source| source.base == base) {
+            source.snapshots.push(snapshot);
+        } else {
+            let with_reason = |reason: &'static str| {
+                let mut attrs = base.clone();
+                attrs.push(KeyValue::new(STORE_EVICTION_REASON, reason));
+                attrs
+            };
+            sources.push(ChurnSource {
+                capacity: with_reason(EVICTION_REASON_CAPACITY),
+                replaced: with_reason(EVICTION_REASON_REPLACED),
+                base,
+                snapshots: vec![snapshot],
+            });
+        }
+    }
+    // Register the observable callbacks with the SDK on the first store.
+    LazyLock::force(&CHURN_METRICS);
 }
 
 // Metric attribute keys for the GCS store.

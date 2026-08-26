@@ -167,11 +167,32 @@ groups:
         expr: |
           sum by (cache_type, instance_name) (nativelink_cache_entries)
 
-      # Cache eviction rate
-      - record: nativelink:cache_eviction_rate
+      # Items dropped per second by capacity or timeout pressure.
+      # A replacement is an overwrite of the same key, so it is not churn.
+      - record: nativelink:store_eviction_rate
         expr: |
-          sum by (cache_type, instance_name) (
-            rate(nativelink_cache_operations_total{cache_operation_name="evict"}[5m])
+          sum by (store_name, store_type, instance_name) (
+            rate(nativelink_store_evictions_total{store_eviction_reason="capacity"}[5m])
+          )
+
+      # Fraction of a store replaced per second. Multiply by 3600 for the
+      # turnover per hour. A high value means the store is too small.
+      - record: nativelink:store_churn_rate
+        expr: |
+          sum by (store_name, store_type, instance_name) (
+            rate(nativelink_store_evicted_bytes_total{store_eviction_reason="capacity"}[5m])
+          ) /
+          sum by (store_name, store_type, instance_name) (nativelink_store_current_bytes)
+
+      # Evicted bytes per inserted byte. Above 1 the store cannot hold the
+      # working set of the build.
+      - record: nativelink:store_eviction_per_insert
+        expr: |
+          sum by (store_name, store_type, instance_name) (
+            rate(nativelink_store_evicted_bytes_total{store_eviction_reason="capacity"}[5m])
+          ) /
+          sum by (store_name, store_type, instance_name) (
+            rate(nativelink_store_inserted_bytes_total[5m])
           )
 
       # Cache throughput (bytes/sec)

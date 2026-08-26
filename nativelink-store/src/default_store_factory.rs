@@ -22,7 +22,7 @@ use futures::{Future, TryStreamExt};
 use nativelink_config::stores::{ExperimentalCloudObjectSpec, RedisMode, StoreSpec};
 use nativelink_error::Error;
 use nativelink_util::health_utils::HealthRegistryBuilder;
-use nativelink_util::metrics::StoreType;
+use nativelink_util::metrics::{StoreType, register_churn_source};
 use nativelink_util::store_trait::{Store, StoreDriver};
 
 use crate::azure_blob_store::AzureBlobStore;
@@ -148,6 +148,8 @@ pub fn store_factory<'a>(
             store.clone().register_health(health_registry_builder);
         }
 
+        register_store_churn(&store, name, backend);
+
         let store = Store::new(store);
 
         return if should_wrap_in_metrics_store(backend) {
@@ -160,6 +162,36 @@ pub fn store_factory<'a>(
             Ok(store)
         };
     })
+}
+
+/// Reports the eviction counters of `store` under its config name, if the
+/// store holds its own cache.
+///
+/// Stores that evict outside this process, for example Redis and the cloud
+/// object stores, have no counters to report and are skipped.
+fn register_store_churn(store: &Arc<dyn StoreDriver>, name: &str, spec: &StoreSpec) {
+    // ponytail: strong handle. Stores live for the whole process, so there is
+    // nothing to release. Switch to Weak if stores ever become droppable.
+    let any_store = store.clone().as_any_arc();
+    if let Ok(store) = any_store.clone().downcast::<MemoryStore>() {
+        register_churn_source(
+            compute_store_type(spec),
+            name,
+            Box::new(move || store.get_eviction_snapshot()),
+        );
+    } else if let Ok(store) = any_store.clone().downcast::<FilesystemStore>() {
+        register_churn_source(
+            compute_store_type(spec),
+            name,
+            Box::new(move || store.get_eviction_snapshot()),
+        );
+    } else if let Ok(store) = any_store.downcast::<ExistenceCacheStore<SystemTime>>() {
+        register_churn_source(
+            compute_store_type(spec),
+            name,
+            Box::new(move || store.get_eviction_snapshot()),
+        );
+    }
 }
 
 fn should_wrap_in_metrics_store(spec: &StoreSpec) -> bool {

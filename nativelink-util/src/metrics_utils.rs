@@ -264,6 +264,12 @@ impl Counter {
     pub fn sub(&self, value: u64) {
         self.0.fetch_sub(value, Ordering::Acquire);
     }
+
+    #[inline]
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 impl MetricsComponent for Counter {
@@ -284,6 +290,12 @@ pub struct CounterWithTime {
 }
 
 impl CounterWithTime {
+    #[inline]
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.counter.load(Ordering::Acquire)
+    }
+
     #[inline]
     pub fn inc(&self) {
         self.counter.fetch_add(1, Ordering::Acquire);

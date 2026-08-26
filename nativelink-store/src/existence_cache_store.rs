@@ -25,7 +25,7 @@ use nativelink_error::{Error, ResultExt, error_if};
 use nativelink_metric::MetricsComponent;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::common::DigestInfo;
-use nativelink_util::evicting_map::{EvictingMap, LenEntry};
+use nativelink_util::evicting_map::{EvictingMap, EvictionSnapshot, LenEntry};
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::store_trait::{
@@ -130,6 +130,10 @@ impl<I: InstantWrapper> ExistenceCacheStore<I> {
             .register_remove_callback(Arc::new(ExistenceCacheCallback { cache: other_ref }))
             .expect("Register remove callback should work");
         existence_cache_store
+    }
+
+    pub fn get_eviction_snapshot(&self) -> EvictionSnapshot {
+        self.existence_cache.get_snapshot()
     }
 
     pub async fn exists_in_cache(&self, digest: &DigestInfo) -> bool {
