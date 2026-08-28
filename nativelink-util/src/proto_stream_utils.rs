@@ -197,8 +197,12 @@ impl Stream for FirstStream {
 }
 
 /// This structure wraps all of the information required to perform a write
-/// request on the `GrpcStore`.  It stores the last message retrieved which allows
-/// the write to resume since the UUID allows upload resume at the server.
+/// request on the `GrpcStore`.  It stores the last two messages retrieved, which
+/// lets a failed write replay them on the next attempt.
+///
+/// The replay only covers a stream that is still within those two messages. See
+/// `resume_replays_whole_stream` for why a resume past the first byte is not
+/// safe against an upstream with more than one backend.
 #[derive(Debug)]
 pub struct WriteState<T, E>
 where
@@ -254,9 +258,35 @@ where
         }
     }
 
+    /// The oldest message a resume can replay, if any. `cached_messages[0]` is
+    /// the newest, so the older slot wins when both are filled.
+    const fn oldest_cached_message(&self) -> Option<&WriteRequest> {
+        match &self.cached_messages[1] {
+            Some(message) => Some(message),
+            None => self.cached_messages[0].as_ref(),
+        }
+    }
+
+    /// Whether a resume replays the whole stream from its first byte.
+    ///
+    /// The buffer holds two messages, so this is true only while those two are
+    /// still everything that was sent. A replay that starts past offset 0
+    /// instead needs the server to still hold the partial upload for this UUID.
+    /// The client cannot know that it will reach that server: a retry
+    /// re-resolves the endpoint, and every upstream here (a headless service, a
+    /// `ClusterIP` over many pods) has more than one backend. A fresh backend has
+    /// received nothing, so it rejects the resumed offset with `Received out of
+    /// order data`, which is permanent and fails the whole write.
+    const fn resume_replays_whole_stream(&self) -> bool {
+        match self.oldest_cached_message() {
+            Some(message) => message.write_offset == 0,
+            None => false,
+        }
+    }
+
     pub const fn can_resume(&self) -> bool {
         self.read_stream_error.is_none()
-            && (self.cached_messages[0].is_some() || self.read_stream.is_first_msg())
+            && (self.read_stream.is_first_msg() || self.resume_replays_whole_stream())
     }
 
     pub fn resume(&mut self) {

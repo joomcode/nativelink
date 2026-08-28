@@ -587,9 +587,17 @@ impl GrpcStore {
                                         local_state_locked.resume();
                                         RetryResult::Retry(err.clone())
                                     } else {
-                                        RetryResult::Err(
-                                            err.clone().append("Retry is not possible"),
-                                        )
+                                        // The upload already streamed past the
+                                        // replay buffer, so a retry cannot
+                                        // rebuild it from the first byte. Fail
+                                        // with the original error, which the
+                                        // caller can retry from the start,
+                                        // instead of resuming mid-stream and
+                                        // turning it into a permanent
+                                        // InvalidArgument at the server.
+                                        RetryResult::Err(err.clone().append(
+                                            "Retry is not possible, the upload cannot replay from its first byte",
+                                        ))
                                     }
                                 }
                             }

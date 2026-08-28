@@ -86,3 +86,86 @@ async fn ensure_no_errors_if_only_first_message_has_resource_name_set() -> Resul
 
     Ok(())
 }
+
+/// Builds a `WriteState` over `count` 4-byte messages and drains `taken` of
+/// them through the wrapper, so the replay buffer holds the last two taken.
+async fn state_after_taking(
+    count: usize,
+    taken: usize,
+) -> Result<
+    Arc<Mutex<WriteState<UnboundedReceiverStream<Result<WriteRequest, Error>>, Error>>>,
+    Error,
+> {
+    const CHUNK: &[u8] = b"abcd";
+    let size = (count * CHUNK.len()) as u64;
+    let digest = DigestInfo::new([0u8; 32], size);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<WriteRequest, Error>>();
+    for i in 0..count {
+        tx.send(Ok(WriteRequest {
+            resource_name: if i == 0 {
+                format!(
+                    "{INSTANCE_NAME}/uploads/some-uuid/blobs/{}/{}",
+                    digest.packed_hash(),
+                    digest.size_bytes()
+                )
+            } else {
+                String::new()
+            },
+            write_offset: (i * CHUNK.len()) as i64,
+            finish_write: i + 1 == count,
+            data: Bytes::from_static(CHUNK),
+        }))
+        .unwrap();
+    }
+    drop(tx);
+
+    let local_state = Arc::new(Mutex::new(WriteState::new(
+        INSTANCE_NAME.to_string(),
+        WriteRequestStreamWrapper::from(UnboundedReceiverStream::new(rx)).await?,
+    )));
+    let mut wrapper = WriteStateWrapper::new(local_state.clone());
+    for _ in 0..taken {
+        assert!(wrapper.next().await.is_some());
+    }
+    Ok(local_state)
+}
+
+/// A resume is only safe while the replay buffer still holds the whole stream.
+///
+/// Past that point the replay starts at a non-zero `write_offset`, which only a
+/// server that still holds the partial upload for this UUID accepts. A retry
+/// re-resolves the endpoint and can reach a different backend, which has
+/// received nothing and answers `Received out of order data`. That is
+/// `InvalidArgument`, which is permanent and fails the whole write.
+#[nativelink_test]
+async fn resume_is_refused_once_the_replay_cannot_start_at_offset_zero() -> Result<(), Error> {
+    // Nothing taken yet: the retry re-sends the first message, offset 0.
+    assert!(
+        state_after_taking(4, 0).await?.lock().can_resume(),
+        "a write that sent nothing must resume"
+    );
+
+    // One and two messages taken are both still wholly inside the buffer.
+    assert!(
+        state_after_taking(4, 1).await?.lock().can_resume(),
+        "the buffer still holds the whole stream after one message"
+    );
+    assert!(
+        state_after_taking(4, 2).await?.lock().can_resume(),
+        "the buffer still holds the whole stream after two messages"
+    );
+
+    // Three taken: the buffer holds messages at offsets 4 and 8, so the first
+    // 4 bytes are gone and the replay would start at offset 4.
+    assert!(
+        !state_after_taking(4, 3).await?.lock().can_resume(),
+        "a replay starting past offset 0 must be refused"
+    );
+    assert!(
+        !state_after_taking(4, 4).await?.lock().can_resume(),
+        "a replay starting past offset 0 must be refused"
+    );
+
+    Ok(())
+}
