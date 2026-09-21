@@ -316,8 +316,12 @@ pub struct PlatformPropertyReplacement {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "dev-schema", derive(JsonSchema))]
 pub enum PropertyModification {
-    /// Add a property to the action properties.
+    /// Add a property to the action properties, overwriting any existing value.
     Add(PlatformPropertyAddition),
+    /// Add a property to the action properties only when the action does not
+    /// already carry it. Use this to give a property a default value without
+    /// discarding what the client sent.
+    AddIfAbsent(PlatformPropertyAddition),
     /// Remove a named property from the action.
     Remove(String),
     /// If a property is found, then replace it with another one.

@@ -94,6 +94,91 @@ async fn add_action_adds_property() -> Result<(), Error> {
 }
 
 #[nativelink_test]
+async fn add_if_absent_action_adds_property_when_missing() -> Result<(), Error> {
+    let name = "name".to_string();
+    let value = "value".to_string();
+    let context = make_modifier_scheduler(vec![PropertyModification::AddIfAbsent(
+        PlatformPropertyAddition {
+            name: name.clone(),
+            value: value.clone(),
+        },
+    )]);
+    let action_info = make_base_action_info(UNIX_EPOCH, DigestInfo::zero_digest());
+    let (_forward_watch_channel_tx, forward_watch_channel_rx) =
+        watch::channel(Arc::new(ActionState {
+            client_operation_id: OperationId::default(),
+            stage: ActionStage::Queued,
+            action_digest: action_info.unique_qualifier.digest(),
+            last_transition_timestamp: SystemTime::now(),
+        }));
+    let client_operation_id = OperationId::default();
+    let (_, (passed_client_operation_id, action_info)) = join!(
+        context
+            .modifier_scheduler
+            .add_action(client_operation_id.clone(), action_info.clone()),
+        context
+            .mock_scheduler
+            .expect_add_action(Ok(Box::new(TokioWatchActionStateResult::new(
+                client_operation_id.clone(),
+                action_info,
+                forward_watch_channel_rx
+            )))),
+    );
+    assert_eq!(client_operation_id, passed_client_operation_id);
+    assert_eq!(
+        HashMap::from([(name, value)]),
+        action_info.platform_properties
+    );
+    Ok(())
+}
+
+#[nativelink_test]
+async fn add_if_absent_action_keeps_existing_property() -> Result<(), Error> {
+    let name = "name".to_string();
+    let original_value = "value".to_string();
+    let default_value = "default".to_string();
+    let context = make_modifier_scheduler(vec![PropertyModification::AddIfAbsent(
+        PlatformPropertyAddition {
+            name: name.clone(),
+            value: default_value,
+        },
+    )]);
+    let mut action_info = make_base_action_info(UNIX_EPOCH, DigestInfo::zero_digest())
+        .as_ref()
+        .clone();
+    action_info
+        .platform_properties
+        .insert(name.clone(), original_value.clone());
+    let action_info = Arc::new(action_info);
+    let (_forward_watch_channel_tx, forward_watch_channel_rx) =
+        watch::channel(Arc::new(ActionState {
+            client_operation_id: OperationId::default(),
+            stage: ActionStage::Queued,
+            action_digest: action_info.unique_qualifier.digest(),
+            last_transition_timestamp: SystemTime::now(),
+        }));
+    let client_operation_id = OperationId::default();
+    let (_, (passed_client_operation_id, action_info)) = join!(
+        context
+            .modifier_scheduler
+            .add_action(client_operation_id.clone(), action_info.clone()),
+        context
+            .mock_scheduler
+            .expect_add_action(Ok(Box::new(TokioWatchActionStateResult::new(
+                client_operation_id.clone(),
+                action_info,
+                forward_watch_channel_rx
+            )))),
+    );
+    assert_eq!(client_operation_id, passed_client_operation_id);
+    assert_eq!(
+        HashMap::from([(name, original_value)]),
+        action_info.platform_properties
+    );
+    Ok(())
+}
+
+#[nativelink_test]
 async fn add_action_overwrites_property() -> Result<(), Error> {
     let name = "name".to_string();
     let original_value = "value".to_string();
