@@ -80,7 +80,7 @@ impl PropertyModifierScheduler {
                 | PropertyModification::Replace(PlatformPropertyReplacement { name, .. }) => {
                     known_properties.insert(name.clone());
                 }
-                PropertyModification::Add(_) => (),
+                PropertyModification::Add(_) | PropertyModification::AddIfAbsent(_) => (),
             }
         }
         let final_known_properties: Vec<String> = known_properties.into_iter().collect();
@@ -103,6 +103,12 @@ impl PropertyModifierScheduler {
                     action_info_mut
                         .platform_properties
                         .insert(addition.name.clone(), addition.value.clone());
+                }
+                PropertyModification::AddIfAbsent(addition) => {
+                    action_info_mut
+                        .platform_properties
+                        .entry(addition.name.clone())
+                        .or_insert_with(|| addition.value.clone());
                 }
                 PropertyModification::Remove(name) => {
                     action_info_mut.platform_properties.remove(name);
