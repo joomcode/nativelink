@@ -467,6 +467,68 @@ async fn metrics_are_tracked_with_otel_endpoint() -> Result<(), Box<dyn core::er
     Ok(())
 }
 
+// A collector that accepts connections but never answers, like one on a hung
+// node, must not block the metrics exporter forever.
+#[serial(env)]
+#[nativelink_test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_export_times_out_on_unresponsive_collector()
+-> Result<(), Box<dyn core::error::Error>> {
+    if !dns_configured() {
+        eprintln!(
+            "Skipping metrics_export_times_out_on_unresponsive_collector: no DNS \
+             configuration available (e.g. sandboxed Nix build)"
+        );
+        return Ok(());
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    nativelink_util::background_spawn!("otlp_black_hole_collector", async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            // Keep the socket open without ever answering.
+            core::mem::forget(stream);
+        }
+    });
+
+    // SAFETY: `#[serial(env)]` serializes all env-var writes across tests.
+    unsafe {
+        env::set_var(NL_OTEL_ENDPOINT, format!("http://127.0.0.1:{port}"));
+        env::set_var("OTEL_EXPORTER_OTLP_TIMEOUT", "300");
+    }
+    let maybe_channel = maybe_load_balanced_channel().await;
+    // SAFETY: `#[serial(env)]` serializes all env-var writes across tests.
+    unsafe {
+        env::remove_var(NL_OTEL_ENDPOINT);
+        env::remove_var("OTEL_EXPORTER_OTLP_TIMEOUT");
+    }
+    let channel = maybe_channel.expect("Expected a channel when NL_OTEL_ENDPOINT is set");
+    let exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_channel(channel.into())
+        .with_protocol(Protocol::Grpc)
+        .build()?;
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .build();
+    meter_provider
+        .meter("nativelink_test")
+        .u64_counter("test.operations")
+        .build()
+        .add(1, &[]);
+
+    // Without a timeout on the channel the export never returns and this
+    // flush hangs.
+    let start = std::time::Instant::now();
+    let flush_result = meter_provider.force_flush();
+    let elapsed = start.elapsed();
+    assert!(flush_result.is_err(), "Export to a black hole must fail");
+    assert!(
+        elapsed < core::time::Duration::from_secs(3),
+        "Export must time out after OTEL_EXPORTER_OTLP_TIMEOUT, took {elapsed:?}"
+    );
+    Ok(())
+}
+
 #[nativelink_test]
 async fn inject_current_context_carries_baggage() -> Result<(), Box<dyn core::error::Error>> {
     // Production installs this propagator pair in `init_tracing`; without it

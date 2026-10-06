@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use core::default::Default;
+use core::time::Duration;
 use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, OnceLock};
@@ -29,7 +30,8 @@ use opentelemetry::{KeyValue, global};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_http::HeaderExtractor;
 use opentelemetry_otlp::{
-    LogExporter, MetricExporter, Protocol, SpanExporter, WithExportConfig, WithTonicConfig,
+    LogExporter, MetricExporter, OTEL_EXPORTER_OTLP_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT,
+    Protocol, SpanExporter, WithExportConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
@@ -234,8 +236,17 @@ pub async fn maybe_load_balanced_channel() -> Option<LoadBalancedChannel> {
                 .err_tip(|| format!("Unable to get port from endpoint {endpoint}"))
                 .unwrap();
 
+            // The exporters skip their own timeout when given a channel, and
+            // the SDK readers do not enforce one either. Without this, one
+            // export to a dead collector hangs the exporter for good.
+            let timeout = env::var(OTEL_EXPORTER_OTLP_TIMEOUT)
+                .ok()
+                .and_then(|ms| ms.parse().ok())
+                .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis);
+
             Some(
                 LoadBalancedChannel::builder((host.to_string(), port))
+                    .timeout(timeout)
                     .channel()
                     .await
                     .map_err(|e| make_err!(Code::Internal, "Invalid hostname '{endpoint}': {e}"))
