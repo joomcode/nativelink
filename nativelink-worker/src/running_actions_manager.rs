@@ -2939,12 +2939,26 @@ impl RunningActionsManager for RunningActionsManagerImpl {
         action_result: &mut ActionResult,
         hasher: DigestHasherFunc,
     ) -> Result<(), Error> {
+        // The worker reports the result to the scheduler only after this
+        // returns, so an AC write that never finishes would leave the action
+        // Executing forever.
+        let cache_fut = self.upload_action_results.cache_action_result(
+            action_info,
+            action_result,
+            hasher,
+        );
         self.metrics
-            .wrap_cache_action_result(self.upload_action_results.cache_action_result(
-                action_info,
-                action_result,
-                hasher,
-            ))
+            .wrap_cache_action_result(async {
+                tokio::time::timeout(self.max_upload_timeout, Box::pin(cache_fut))
+                    .await
+                    .map_err(|_| {
+                        make_err!(
+                            Code::DeadlineExceeded,
+                            "Caching action result timed out after {:?}",
+                            self.max_upload_timeout
+                        )
+                    })?
+            })
             .await
     }
 

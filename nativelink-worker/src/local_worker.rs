@@ -195,20 +195,21 @@ impl<'a, T: WorkerApiClientTrait + 'static, U: RunningActionsManager> LocalWorke
         interval.tick().await;
 
         // Explicitly spawn the keep alive loop so it goes onto a different thread from the execute commands
-        drop(
-            spawn!("keep alives", async move {
-                loop {
-                    interval.tick().await;
-                    if let Err(e) = grpc_client.keep_alive(KeepAliveRequest {}).await {
-                        error!(?e, "Failed to send KeepAlive in LocalWorker");
-                        return;
-                    }
-                    debug!("Sent KeepAlive");
+        let err = spawn!("keep alives", async move {
+            loop {
+                interval.tick().await;
+                if let Err(e) = grpc_client.keep_alive(KeepAliveRequest {}).await {
+                    error!(?e, "Failed to send KeepAlive in LocalWorker");
+                    return e;
                 }
-            })
-            .await,
-        );
-        Ok(())
+                debug!("Sent KeepAlive");
+            }
+        })
+        .await
+        .map_err(|e| make_err!(Code::Internal, "KeepAlive task failed: {e:?}"))?;
+        // `run()` treats a finished future as success, so returning `Ok` here
+        // would leave the worker attached to a scheduler it cannot reach.
+        Err(err).err_tip(|| "KeepAlive to scheduler failed, reconnecting")
     }
 
     async fn run(
@@ -769,7 +770,16 @@ pub async fn new_local_worker(
                                 .append("Invalid URI for worker endpoint")
                         })?
                         .connect_timeout(timeout_duration)
-                        .timeout(timeout_duration);
+                        .timeout(timeout_duration)
+                        // `timeout` only bounds the response headers, not the
+                        // ConnectWorker stream. HTTP/2 PING is what ends that
+                        // stream when the scheduler stops answering without
+                        // closing the connection, so the worker reconnects.
+                        // Same values as `tls_utils::apply_transport_settings`.
+                        .tcp_keepalive(Some(Duration::from_secs(30)))
+                        .http2_keep_alive_interval(Duration::from_secs(30))
+                        .keep_alive_timeout(Duration::from_secs(20))
+                        .keep_alive_while_idle(true);
 
                 let transport = endpoint.connect().await.map_err(|e| {
                     Error::from_std_err(Code::Internal, &e).append(format!(

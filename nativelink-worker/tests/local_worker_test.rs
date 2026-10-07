@@ -1140,3 +1140,82 @@ async fn keep_alive_fail_logs() -> Result<(), Error> {
         "Timed out looking for KeepAlive logs"
     ))
 }
+
+// A failed KeepAlive means the scheduler is unreachable. The worker must drop
+// the connection even while an action is running, instead of waiting on a
+// dead stream for the life of the process.
+#[nativelink_test]
+async fn keep_alive_fail_with_running_action_disconnects() -> Result<(), Error> {
+    let local_worker_config = LocalWorkerConfig {
+        platform_properties: HashMap::new(),
+        worker_api_endpoint: EndpointConfig {
+            timeout: Some(0.01),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut test_context = setup_local_worker_with_config(local_worker_config).await;
+    let streaming_response = test_context.maybe_streaming_response.take().unwrap();
+    test_context
+        .client
+        .expect_connect_worker(Ok(streaming_response))
+        .await;
+    let tx_stream = test_context.maybe_tx_stream.take().unwrap();
+    tx_stream
+        .send(Frame::data(
+            encode_stream_proto(&UpdateForWorker {
+                update: Some(Update::ConnectionResult(ConnectionResult {
+                    worker_id: "foobar".to_string(),
+                })),
+            })
+            .unwrap(),
+        ))
+        .await
+        .map_err(|e| make_input_err!("Could not send : {:?}", e))?;
+
+    let action_info = ActionInfo {
+        command_digest: DigestInfo::new([1u8; 32], 10),
+        input_root_digest: DigestInfo::new([2u8; 32], 10),
+        timeout: Duration::from_secs(1),
+        platform_properties: HashMap::new(),
+        priority: 0,
+        load_timestamp: SystemTime::UNIX_EPOCH,
+        insert_timestamp: SystemTime::UNIX_EPOCH,
+        unique_qualifier: ActionUniqueQualifier::Uncacheable(ActionUniqueKey {
+            instance_name: INSTANCE_NAME.to_string(),
+            digest_function: DigestHasherFunc::Sha256,
+            digest: DigestInfo::new([3u8; 32], 10),
+        }),
+    };
+    tx_stream
+        .send(Frame::data(
+            encode_stream_proto(&UpdateForWorker {
+                update: Some(Update::StartAction(StartExecute {
+                    execute_request: Some((&action_info).into()),
+                    operation_id: String::new(),
+                    queued_timestamp: None,
+                    platform: Some(Platform::default()),
+                    worker_id: "foobar".to_string(),
+                })),
+            })
+            .unwrap(),
+        ))
+        .await
+        .map_err(|e| make_input_err!("Could not send : {:?}", e))?;
+
+    // The action stays in flight: nobody answers its prepare step.
+    test_context
+        .actions_manager
+        .expect_create_and_add_action(Ok(Arc::new(MockRunningAction::new())))
+        .await;
+
+    // The mock fails the second KeepAlive. Leaving `run()` kills all actions.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        test_context.actions_manager.expect_kill_all(),
+    )
+    .await
+    .map_err(|_| make_err!(Code::DeadlineExceeded, "Worker did not disconnect"))?;
+    Ok(())
+}
