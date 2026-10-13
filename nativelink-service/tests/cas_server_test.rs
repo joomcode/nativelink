@@ -1555,6 +1555,7 @@ async fn chunking_on_grpc_store_forbids_index_store() -> Result<(), Box<dyn core
                     tcp_keepalive_s: 0,
                     http2_keepalive_interval_s: 0,
                     http2_keepalive_timeout_s: 0,
+                    max_connection_age_s: 0,
                 }],
                 store_type: nativelink_config::stores::StoreType::Cas,
                 retry: nativelink_config::stores::Retry::default(),

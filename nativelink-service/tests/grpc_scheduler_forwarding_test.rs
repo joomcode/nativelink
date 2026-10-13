@@ -302,6 +302,7 @@ async fn grpc_scheduler_forwards_the_client_and_resolves_its_operation() -> Resu
             tcp_keepalive_s: 0,
             http2_keepalive_interval_s: 0,
             http2_keepalive_timeout_s: 0,
+            max_connection_age_s: 0,
         },
         retry: Retry::default(),
         max_concurrent_requests: 0,

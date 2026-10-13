@@ -158,6 +158,12 @@ impl LoadBalancedOptions {
     pub const fn request_timeout(&self) -> Duration {
         self.request_timeout
     }
+
+    /// Age after which a pooled connection is replaced, zero if disabled.
+    #[must_use]
+    pub const fn max_connection_age(&self) -> Duration {
+        Duration::from_secs(self.endpoint_config.max_connection_age_s)
+    }
 }
 
 /// Build the balancing settings for `endpoint_config`, used when the store

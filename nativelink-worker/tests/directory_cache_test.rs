@@ -1592,6 +1592,7 @@ async fn get_tree_prefetch_follows_server_pagination() -> Result<(), Error> {
             tcp_keepalive_s: 0,
             http2_keepalive_interval_s: 0,
             http2_keepalive_timeout_s: 0,
+            max_connection_age_s: 0,
         }],
         store_type: StoreType::Cas,
         retry: Retry::default(),
