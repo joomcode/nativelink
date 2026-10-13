@@ -26,8 +26,11 @@
 //! per-call timeout.
 
 use core::pin::Pin;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::sync::Arc;
+
+use futures::StreamExt;
 
 use nativelink_config::stores::{GrpcEndpoint, Retry};
 use nativelink_error::Error;
@@ -77,16 +80,51 @@ impl ByteStream for FakeByteStream {
 }
 
 async fn fake_grpc_server_endpoint() -> Endpoint {
+    counting_grpc_server_endpoint().await.0
+}
+
+/// Like `fake_grpc_server_endpoint`, plus a count of accepted TCP connections.
+async fn counting_grpc_server_endpoint() -> (Endpoint, Arc<AtomicUsize>) {
     let listener = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    let incoming = listener.inspect(move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+    });
     background_spawn!("connection_manager_test_server", async move {
         Server::builder()
             .add_service(ByteStreamServer::new(FakeByteStream))
-            .serve_with_incoming(listener)
+            .serve_with_incoming(incoming)
             .await
             .unwrap();
     });
-    Endpoint::from_shared(format!("http://127.0.0.1:{port}")).unwrap()
+    let endpoint = Endpoint::from_shared(format!("http://127.0.0.1:{port}")).unwrap();
+    (endpoint, accepted)
+}
+
+/// The server accepts asynchronously from the client's connect, so poll.
+async fn wait_for_accepted(accepted: &AtomicUsize, expected: usize) {
+    timeout(Duration::from_secs(5), async {
+        while accepted.load(Ordering::SeqCst) < expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("server did not accept connection #{expected} within 5s"));
+}
+
+fn balanced_config(endpoint: &Endpoint, max_connection_age_s: u64) -> GrpcEndpoint {
+    GrpcEndpoint {
+        address: format!("grpc://{}", endpoint.uri().authority().unwrap()),
+        tls_config: None,
+        concurrency_limit: None,
+        connect_timeout_s: 30,
+        tcp_keepalive_s: 0,
+        http2_keepalive_interval_s: 0,
+        http2_keepalive_timeout_s: 0,
+        max_connection_age_s,
+    }
 }
 
 /// Identity jitter so retry timing stays predictable in tests.
@@ -190,16 +228,7 @@ async fn balanced_channel_establishes_connection() -> Result<(), Error> {
     const MAX_CONCURRENT: usize = 1;
 
     let endpoint = fake_grpc_server_endpoint().await;
-    let config = GrpcEndpoint {
-        address: format!("grpc://{}", endpoint.uri().authority().unwrap()),
-        tls_config: None,
-        concurrency_limit: None,
-        connect_timeout_s: 30,
-        tcp_keepalive_s: 0,
-        http2_keepalive_interval_s: 0,
-        http2_keepalive_timeout_s: 0,
-    };
-    let options = load_balanced_options(&config, Duration::ZERO)?;
+    let options = load_balanced_options(&balanced_config(&endpoint, 0), Duration::ZERO)?;
     let cm = ConnectionManager::new(
         vec![(endpoint, Some(options))],
         MAX_CONCURRENT,
@@ -254,5 +283,33 @@ async fn extra_request_above_max_blocks_until_a_release() -> Result<(), Error> {
 
     drop(c2);
     drop(c3);
+    Ok(())
+}
+
+#[nativelink_test]
+async fn balanced_channel_is_replaced_after_max_age() -> Result<(), Error> {
+    let (endpoint, accepted) = counting_grpc_server_endpoint().await;
+    let options = load_balanced_options(&balanced_config(&endpoint, 1), Duration::ZERO)?;
+    let cm = ConnectionManager::new(
+        vec![(endpoint, Some(options))],
+        /* connections_per_endpoint = */ 1,
+        /* max_concurrent_requests = */ 1,
+        Retry::default(),
+        no_jitter(),
+    );
+
+    drop(cm.connection("fresh".into()).await?);
+    wait_for_accepted(&accepted, 1).await;
+
+    // Past the 1s age plus the maximum +50% jitter. The pooled channel is
+    // only retired when a request returns it, so use it once more.
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    drop(cm.connection("expired".into()).await?);
+
+    let conn = timeout(Duration::from_secs(5), cm.connection("replacement".into()))
+        .await
+        .expect("acquire blocked >5s — expired channel was not replaced")?;
+    wait_for_accepted(&accepted, 2).await;
+    drop(conn);
     Ok(())
 }

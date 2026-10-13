@@ -1418,6 +1418,20 @@ pub struct GrpcEndpoint {
     /// If not set or 0, defaults to 20 seconds.
     #[serde(default, deserialize_with = "convert_duration_with_shellexpand")]
     pub http2_keepalive_timeout_s: u64,
+
+    /// Maximum age (seconds) of a pooled connection. A connection older than
+    /// this is not reused once its current request returns it to the pool; a
+    /// replacement is dialed instead, re-resolving DNS. Without this, pooled
+    /// connections never move, so backends that become ready after a
+    /// reconnect wave (e.g. pods replaced during a node event) get no
+    /// traffic. Each connection's age is jittered up to +50% so the pool is
+    /// not replaced all at once. In-flight requests finish on the old
+    /// connection.
+    ///
+    /// Only applies with `load_balanced_channel: true`.
+    /// If not set or 0, connections are kept until they fail.
+    #[serde(default, deserialize_with = "convert_duration_with_shellexpand")]
+    pub max_connection_age_s: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

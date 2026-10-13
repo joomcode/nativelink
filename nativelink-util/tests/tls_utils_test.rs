@@ -199,6 +199,7 @@ fn grpc_endpoint(connect_timeout_s: u64) -> GrpcEndpoint {
         tcp_keepalive_s: 0,
         http2_keepalive_interval_s: 0,
         http2_keepalive_timeout_s: 0,
+        max_connection_age_s: 0,
     }
 }
 

@@ -93,6 +93,9 @@ struct EstablishedChannel {
     channel: Channel,
     /// The identifier of the channel in the worker.
     identifier: ChannelIdentifier,
+    /// When set, the channel is replaced instead of being returned to the
+    /// pool after this instant. See `GrpcEndpoint::max_connection_age_s`.
+    expires_at: Option<Instant>,
 }
 
 /// The context of the worker used to manage all of the connections.  This
@@ -323,6 +326,10 @@ impl ConnectionManagerWorker {
             endpoint_index,
             connection_index,
         };
+        let max_age = balanced_options
+            .as_ref()
+            .map(LoadBalancedOptions::max_connection_age)
+            .filter(|age| !age.is_zero());
         let balanced_options = balanced_options.clone();
         let connection_stream = unfold(endpoint.clone(), move |endpoint| {
             let balanced_options = balanced_options.clone();
@@ -346,6 +353,10 @@ impl ConnectionManagerWorker {
                     Ok(EstablishedChannel {
                         channel: channel.into(),
                         identifier,
+                        // Jitter so a pool dialed at once does not expire at once.
+                        expires_at: max_age.map(|age| {
+                            Instant::now() + age.mul_f64(1.0 + rand::random_range(0.0..0.5))
+                        }),
                     })
                 },
             )
@@ -542,12 +553,12 @@ impl ConnectionManagerWorker {
         match request {
             ConnectionRequest::Dropped(maybe_channel) => {
                 if let Some(channel) = maybe_channel {
-                    self.available_channels.push_back(channel);
+                    self.return_channel(channel);
                 }
                 self.maybe_available_connection();
             }
             ConnectionRequest::Connected(channel) => {
-                self.available_channels.push_back(channel);
+                self.return_channel(channel);
                 self.maybe_available_connection();
             }
             // Handle a transport error on a connection by making it unavailable
@@ -568,6 +579,25 @@ impl ConnectionManagerWorker {
             }
         }
         self.record_saturation();
+    }
+
+    /// Put a channel back into the pool, or replace it if it is past its max
+    /// age. A channel is outside the pool while a request holds it, so this
+    /// is the single point where it can be retired without racing a user;
+    /// requests still running on it keep their own clone and finish there.
+    fn return_channel(&mut self, channel: EstablishedChannel) {
+        if channel
+            .expires_at
+            .is_some_and(|expires_at| Instant::now() >= expires_at)
+        {
+            debug!(
+                connection_index = channel.identifier.connection_index,
+                "ConnectionManager: connection reached max age, replacing"
+            );
+            self.connect_endpoint(channel.identifier.endpoint_index, None);
+        } else {
+            self.available_channels.push_back(channel);
+        }
     }
 }
 
@@ -600,6 +630,7 @@ impl Drop for Connection {
             .map(|channel| EstablishedChannel {
                 channel,
                 identifier: self.channel.identifier,
+                expires_at: self.channel.expires_at,
             });
         drop(self.tx.send(ConnectionRequest::Dropped(pending_channel)));
     }
@@ -644,6 +675,7 @@ impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> f
                                 .send(ConnectionRequest::Connected(EstablishedChannel {
                                     channel: pending_channel,
                                     identifier: self.channel.identifier,
+                                    expires_at: self.channel.expires_at,
                                 })),
                         );
                     }
