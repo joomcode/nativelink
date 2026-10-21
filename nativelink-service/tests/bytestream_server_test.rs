@@ -1998,6 +1998,54 @@ async fn write_too_many_bytes_fails() -> Result<(), Box<dyn core::error::Error>>
     Ok(())
 }
 
+#[nativelink_test]
+async fn write_finished_short_fails_and_does_not_commit() -> Result<(), Box<dyn core::error::Error>>
+{
+    const EXPECTED_SIZE: usize = 10;
+
+    // The first message alone takes the oneshot path, two messages take the
+    // streaming path.
+    for chunks in [vec![4usize], vec![4, 2]] {
+        let store_manager = make_store_manager().await?;
+        let store = store_manager.get_store("main_cas").unwrap();
+        let (tx, join_handle) = make_stream_and_writer_spawn(
+            Arc::new(make_bytestream_server(store_manager.as_ref(), None)?),
+            None,
+        );
+
+        let mut offset = 0;
+        for (i, len) in chunks.iter().enumerate() {
+            tx.send(Frame::data(encode_stream_proto(&WriteRequest {
+                resource_name: make_resource_name(EXPECTED_SIZE),
+                write_offset: offset as i64,
+                finish_write: i == chunks.len() - 1,
+                data: vec![0u8; *len].into(),
+            })?))
+            .await?;
+            offset += len;
+        }
+
+        let err = join_handle
+            .await?
+            .expect_err("Expected an error for a short finish_write");
+        assert!(
+            err.to_string().contains(&format!(
+                "finished write at {offset} bytes, expected {EXPECTED_SIZE}"
+            )),
+            "Got wrong error for chunks {chunks:?}: {err:?}"
+        );
+        assert!(
+            store
+                .has(DigestInfo::try_new(HASH1, EXPECTED_SIZE)?)
+                .await?
+                .is_none(),
+            "Short write was committed for chunks {chunks:?}",
+        );
+        drop(tx);
+    }
+    Ok(())
+}
+
 // NOTE: UUID collision fix has been verified manually.
 // When two uploads use the same UUID and one is active, the server generates
 // a unique UUID using nanosecond timestamp for the second upload.

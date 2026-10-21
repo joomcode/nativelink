@@ -958,6 +958,15 @@ impl ByteStreamServer {
                     return Err(make_input_err!("Received more bytes than expected"));
                 }
                 if write_request.finish_write {
+                    // A short finish must not reach the store as EOF, or the
+                    // store commits a truncated blob under the full digest.
+                    if tx.get_bytes_written() != expected_size {
+                        return Err(make_input_err!(
+                            "Client finished write at {} bytes, expected {}",
+                            tx.get_bytes_written(),
+                            expected_size
+                        ));
+                    }
                     // Gracefully close our stream.
                     // REAPI requires the completed upload to match its digest:
                     // https://github.com/bazelbuild/remote-apis/blob/main/build/bazel/remote/execution/v2/remote_execution.proto
@@ -1083,6 +1092,13 @@ impl ByteStreamServer {
             }
 
             if write_request.finish_write {
+                if bytes_received != expected_size {
+                    return Err(make_input_err!(
+                        "Client finished write at {} bytes, expected {}",
+                        bytes_received,
+                        expected_size
+                    ));
+                }
                 break;
             }
         }
