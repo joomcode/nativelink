@@ -97,4 +97,24 @@ fn test_global_config_fields_are_all_optional() {
         global.metrics_identity_allowlist,
         vec!["ci".to_string(), "local".to_string()]
     );
+    assert_eq!(
+        global.graceful_shutdown_timeout_s, 0,
+        "0 keeps the immediate exit on SIGTERM"
+    );
+}
+
+#[test]
+fn test_global_graceful_shutdown_timeout() {
+    let config: CasConfig = serde_json5::from_str(
+        r#"{"stores": [], "servers": [], "global": {"graceful_shutdown_timeout_s": 300}}"#,
+    )
+    .expect("Config with a graceful shutdown timeout should parse");
+
+    assert_eq!(
+        config
+            .global
+            .expect("global config present")
+            .graceful_shutdown_timeout_s,
+        300
+    );
 }
