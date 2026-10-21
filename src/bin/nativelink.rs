@@ -18,6 +18,7 @@
 #![recursion_limit = "256"]
 
 use core::net::SocketAddr;
+use core::pin::pin;
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -217,6 +218,14 @@ async fn inner_main(
             HttpCompressionAlgorithm::None => None,
         }
     }
+
+    // With a drain timeout, connections hold the shutdown guard until they
+    // finish, so the SIGTERM handler waits for them. Without one, they do not
+    // join and the process exits as before.
+    let drain_connections = cfg
+        .global
+        .as_ref()
+        .is_some_and(|global| global.graceful_shutdown_timeout_s > 0);
 
     let health_registry_builder =
         Arc::new(AsyncMutex::new(HealthRegistryBuilder::new("nativelink")));
@@ -709,9 +718,20 @@ async fn inner_main(
             http.http2().max_header_list_size(value);
         }
         info!("Ready, listening on {socket_addr}",);
+        let shutdown_tx = shutdown_tx.clone();
+        let mut listener_shutdown_rx = drain_connections.then(|| shutdown_tx.subscribe());
         root_futures.push(Box::pin(async move {
             loop {
                 select! {
+                    Some(Ok(_)) = OptionFuture::from(listener_shutdown_rx.as_mut().map(broadcast::Receiver::recv)) => {
+                        // Dropping the listener refuses new connections, so
+                        // clients reconnect to another backend. Do not return:
+                        // the end of all root futures tears down the runtime and
+                        // the connections that are still draining.
+                        info!(?socket_addr, "Shutting down, no longer accepting connections");
+                        drop(tcp_listener);
+                        return futures::future::pending().await;
+                    },
                     accept_result = tcp_listener.accept() => {
                         match accept_result {
                             Ok((tcp_stream, remote_addr)) => {
@@ -724,6 +744,7 @@ async fn inner_main(
 
                                 let (http, svc, maybe_tls_acceptor) =
                                     (http.clone(), svc.clone(), maybe_tls_acceptor.clone());
+                                let shutdown_rx = drain_connections.then(|| shutdown_tx.subscribe());
 
                                 background_spawn!(
                                     name: "http_connection",
@@ -750,7 +771,27 @@ async fn inner_main(
                                             ))
                                         };
 
-                                        if let Err(err) = serve_connection.await {
+                                        let mut serve_connection = pin!(serve_connection);
+                                        let result = if let Some(mut shutdown_rx) = shutdown_rx {
+                                            select! {
+                                                result = &mut serve_connection => result,
+                                                Ok(shutdown_guard) = shutdown_rx.recv() => {
+                                                    // Send GOAWAY and let the streams in flight
+                                                    // finish. The guard keeps the process alive
+                                                    // until then.
+                                                    match serve_connection.as_mut().as_pin_mut() {
+                                                        Either::Left(conn) => conn.graceful_shutdown(),
+                                                        Either::Right(conn) => conn.graceful_shutdown(),
+                                                    }
+                                                    let result = serve_connection.await;
+                                                    drop(shutdown_guard);
+                                                    result
+                                                },
+                                            }
+                                        } else {
+                                            serve_connection.await
+                                        };
+                                        if let Err(err) = result {
                                             error!(
                                                 target: "nativelink::services",
                                                 ?err,
@@ -933,8 +974,10 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
             default_digest_hash_function: None,
             default_digest_size_health_check: DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG,
             metrics_identity_allowlist: vec![],
+            graceful_shutdown_timeout_s: 0,
         }
     };
+    let graceful_shutdown_timeout = Duration::from_secs(global_cfg.graceful_shutdown_timeout_s);
     set_open_file_limit(global_cfg.max_open_files);
     set_default_digest_hasher_func(DigestHasherFunc::from(
         global_cfg
@@ -977,7 +1020,18 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         scheduler_shutdown_rx
             .await
             .expect("Failed to receive scheduler shutdown");
-        let () = shutdown_guard.wait_for(Priority::P0).await;
+        let wait_for_guards = shutdown_guard.wait_for(Priority::P0);
+        if graceful_shutdown_timeout.is_zero() {
+            wait_for_guards.await;
+        } else if tokio::time::timeout(graceful_shutdown_timeout, wait_for_guards)
+            .await
+            .is_err()
+        {
+            warn!(
+                ?graceful_shutdown_timeout,
+                "Graceful shutdown timed out, exiting with requests in flight"
+            );
+        }
         warn!("Successfully shut down nativelink.");
         std::process::exit(exit_code);
     });

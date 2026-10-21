@@ -1820,6 +1820,17 @@ pub struct GlobalConfig {
     /// Default: [] (no identities distinguished)
     #[serde(default, deserialize_with = "convert_vec_string_with_shellexpand")]
     pub metrics_identity_allowlist: Vec<String>,
+
+    /// Maximum time to drain on SIGTERM. When set, the process stops
+    /// accepting connections, sends HTTP/2 GOAWAY on every open connection
+    /// and waits for the requests in flight to finish before it exits.
+    /// Requests still open after this time fail.
+    ///
+    /// Keep this below the pod's `terminationGracePeriodSeconds`.
+    ///
+    /// Default: 0 (exit at once on SIGTERM; requests in flight fail)
+    #[serde(default, deserialize_with = "convert_numeric_with_shellexpand")]
+    pub graceful_shutdown_timeout_s: u64,
 }
 
 pub type StoreConfig = NamedConfig<StoreSpec>;
