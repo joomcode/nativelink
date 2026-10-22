@@ -118,7 +118,7 @@ pub(crate) const DEFAULT_CLIENT_ACTION_TIMEOUT_S: u64 = 60;
 /// If this changes, remember to change the documentation in the config.
 const DEFAULT_MAX_JOB_RETRIES: usize = 3;
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct SchedulerState {
     pub actions: ActionsState,
     pub workers: Vec<WorkerState>,

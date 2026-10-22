@@ -2017,7 +2017,7 @@ async fn write_finished_short_fails_and_does_not_commit() -> Result<(), Box<dyn 
         for (i, len) in chunks.iter().enumerate() {
             tx.send(Frame::data(encode_stream_proto(&WriteRequest {
                 resource_name: make_resource_name(EXPECTED_SIZE),
-                write_offset: offset as i64,
+                write_offset: i64::try_from(offset).unwrap(),
                 finish_write: i == chunks.len() - 1,
                 data: vec![0u8; *len].into(),
             })?))

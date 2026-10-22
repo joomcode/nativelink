@@ -102,7 +102,7 @@ pub struct PendingActionInfoData {
 /// action and whose result never arrived.
 pub const LOST_AFTER_MISSED_REPORTS: u32 = 2;
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct WorkerState {
     pub id: WorkerId,
     pub platform_properties: PlatformProperties,
@@ -112,7 +112,7 @@ pub struct WorkerState {
     pub is_draining: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug, Clone, Copy)]
 pub struct ActionsState {
     pub executing: usize,
     pub queued: usize,

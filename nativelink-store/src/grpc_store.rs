@@ -217,7 +217,7 @@ where
 /// the bound.
 async fn send_with_timeout(
     writer: &mut DropCloserWriteHalf,
-    data: bytes::Bytes,
+    data: Bytes,
     timeout: Duration,
     ctx: &'static str,
 ) -> Result<(), Error> {

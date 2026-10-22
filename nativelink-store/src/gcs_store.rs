@@ -287,7 +287,7 @@ where
         let mut hasher = DefaultHasher::new();
         self.refresh_jitter_salt.hash(&mut hasher);
         path.hash(&mut hasher);
-        let per_mille = (hasher.finish() % (CUSTOM_TIME_JITTER_PER_MILLE + 1)) as i64;
+        let per_mille = (hasher.finish() % (CUSTOM_TIME_JITTER_PER_MILLE + 1)).cast_signed();
         self.custom_time_refresh_interval_s.saturating_add(
             self.custom_time_refresh_interval_s
                 .saturating_mul(per_mille)
@@ -320,7 +320,7 @@ where
             return;
         }
 
-        let now_s = (self.now_fn)().unix_timestamp() as i64;
+        let now_s = (self.now_fn)().unix_timestamp().cast_signed();
         if let Some(last_s) = remote_custom_time_s
             && now_s.saturating_sub(last_s) < self.refresh_interval_for(&object_path.path)
         {
@@ -352,7 +352,7 @@ where
             return;
         }
 
-        let now_s = (self.now_fn)().unix_timestamp() as i64;
+        let now_s = (self.now_fn)().unix_timestamp().cast_signed();
 
         // The throttle check, the budget check and the record must all happen
         // under one lock hold. If they do not, a burst of concurrent reads for

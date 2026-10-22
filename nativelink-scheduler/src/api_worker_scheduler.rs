@@ -2279,7 +2279,7 @@ impl ApiWorkerScheduler {
 
     /// Returns a reference to the worker scheduler metrics for recording OTEL metrics.
     #[must_use]
-    pub const fn workerMetrics(&self) -> &WorkerSchedulerMetrics {
+    pub const fn worker_scheduler_metrics(&self) -> &WorkerSchedulerMetrics {
         &self.worker_scheduler_metrics
     }
 

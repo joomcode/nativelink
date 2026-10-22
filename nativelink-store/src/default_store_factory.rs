@@ -152,7 +152,7 @@ pub fn store_factory<'a>(
 
         let store = Store::new(store);
 
-        return if should_wrap_in_metrics_store(backend) {
+        if should_wrap_in_metrics_store(backend) {
             Ok(Store::new(MetricsStore::new(
                 Arc::new(store),
                 name,
@@ -160,7 +160,7 @@ pub fn store_factory<'a>(
             )))
         } else {
             Ok(store)
-        };
+        }
     })
 }
 
@@ -236,8 +236,8 @@ fn compute_store_type(spec: &StoreSpec) -> StoreType {
         StoreSpec::ExperimentalMongo(_) => StoreType::Mongo,
         StoreSpec::RefStore(_) => StoreType::Ref,
         StoreSpec::Shard(_) => StoreType::Shard,
-        _ => {
-            panic!("Invalid store spec: {:?}", spec);
+        StoreSpec::CacheMetrics(_) => {
+            panic!("Invalid store spec: {spec:?}");
         }
     }
 }

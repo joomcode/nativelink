@@ -1758,8 +1758,8 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
                 .sizes_for_keys(keys.iter(), &mut indexed, false /* peek */)
                 .await;
             let mut tasks = Vec::with_capacity(digests.len());
-            for digest in digests.iter().copied() {
-                tasks.push(async move { self.get_executable_hardlink_source(&digest).await });
+            for digest in digests {
+                tasks.push(async move { self.get_executable_hardlink_source(digest).await });
             }
             return futures::stream::iter(tasks)
                 .buffered(MAX_CONCURRENT_VARIANT_LOOKUPS)
@@ -2104,10 +2104,6 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
             .get(&digest.into())
             .await
             .ok_or_else(|| make_err!(Code::NotFound, "{digest} not found in filesystem store. This may indicate the file was evicted due to cache pressure. Consider increasing 'max_bytes' in your filesystem store's eviction_policy configuration."))
-    }
-
-    pub fn get_len(&self) -> u64 {
-        self.evicting_map.len()
     }
 
     async fn update_file(

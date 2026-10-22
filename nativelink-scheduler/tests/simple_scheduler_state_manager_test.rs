@@ -1583,7 +1583,7 @@ fn attributes_execution_metrics_to_identity() {
 
     // Only allowlisted identities are reported, so declare the ones asserted on
     // below. Another test in this binary may have installed them already.
-    let _ = set_identity_allowlist(["ci".to_string(), "local".to_string()]);
+    set_identity_allowlist(["ci".to_string(), "local".to_string()]).ok();
 
     let metrics = SchedulerMetrics::new("test_scheduler");
 

@@ -28,17 +28,10 @@ struct TestContext {
 fn make_router() -> TestContext {
     let compile_scheduler = Arc::new(MockActionScheduler::new());
     let default_scheduler = Arc::new(MockActionScheduler::new());
-    let mut route_map = HashMap::new();
-    route_map.insert(
-        "compile".to_string(),
-        compile_scheduler.clone()
-            as Arc<dyn nativelink_util::operation_state_manager::ClientStateManager>,
-    );
-    let router = PropertyRouterScheduler::new(
-        "container-image",
-        route_map,
-        default_scheduler.clone() as Arc<dyn ClientStateManager>,
-    );
+    let mut route_map: HashMap<String, Arc<dyn ClientStateManager>> = HashMap::new();
+    route_map.insert("compile".to_string(), compile_scheduler.clone());
+    let router =
+        PropertyRouterScheduler::new("container-image", route_map, default_scheduler.clone());
     TestContext {
         compile_scheduler,
         default_scheduler,

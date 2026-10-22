@@ -303,8 +303,8 @@ impl SchedulerMetrics {
 
     // Note: this counts the whole action database, so it is reported without an
     // identity attribute.
-    fn record_actions_count(&self, countByStage: HashMap<CountableActionStage, u64>) {
-        for (stage, count) in countByStage {
+    fn record_actions_count(&self, count_by_stage: HashMap<CountableActionStage, u64>) {
+        for (stage, count) in count_by_stage {
             let attrs = Self::attrs_for_stage(
                 &self.attrs,
                 &match stage {
@@ -685,6 +685,9 @@ where
     queued_actions_tracker: Arc<QueuedActionsTracker<T, I, NowFn>>,
 }
 
+/// A queued-action count and the attributes it is reported with.
+type QueuedActionsCount = (u64, Vec<KeyValue>);
+
 #[derive(Debug)]
 struct QueuedActionsTracker<T, I, NowFn>
 where
@@ -693,7 +696,7 @@ where
     NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
 {
     simple_scheduler_state_manager: Weak<SimpleSchedulerStateManager<T, I, NowFn>>,
-    queued_actions: Arc<tokio::sync::Mutex<Vec<(u64, Vec<KeyValue>)>>>,
+    queued_actions: Arc<tokio::sync::Mutex<Vec<QueuedActionsCount>>>,
 }
 
 impl<T, I, NowFn> QueuedActionsTracker<T, I, NowFn>
@@ -730,8 +733,8 @@ where
 
             let count_by_properties = action_infos
                 .iter()
-                .map(|awaitedAction| {
-                    awaitedAction
+                .map(|awaited_action| {
+                    awaited_action
                         .action_info()
                         .platform_properties
                         .clone()
@@ -769,6 +772,10 @@ where
     I: InstantWrapper,
     NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
 {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "instance_name is the fork's eighth argument"
+    )]
     pub fn new(
         retry_limits: impl Into<RetryLimits>,
         no_event_action_timeout: Duration,
@@ -826,7 +833,7 @@ where
         previous_stage: &ActionStage,
         new_stage: &ActionStage,
         is_retry: bool,
-        action_insert_timestamp: std::time::SystemTime,
+        action_insert_timestamp: SystemTime,
     ) {
         // Only record if the stage actually changed
         if core::mem::discriminant(previous_stage) != core::mem::discriminant(new_stage) {
@@ -2095,7 +2102,7 @@ where
             self.scheduler_metrics.record_actions_count(
                 count
                     .iter()
-                    .map(|(stage, count)| (stage.clone(), *count as u64))
+                    .map(|(stage, count)| (*stage, *count as u64))
                     .collect(),
             );
         }

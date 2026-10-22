@@ -112,7 +112,7 @@ async fn state_after_taking(
             } else {
                 String::new()
             },
-            write_offset: (i * CHUNK.len()) as i64,
+            write_offset: i64::try_from(i * CHUNK.len()).unwrap(),
             finish_write: i + 1 == count,
             data: Bytes::from_static(CHUNK),
         }))

@@ -44,17 +44,17 @@ impl StoreDriver for MetricsStore {
             if res.is_some() {
                 STORE_OPERATION_METRICS
                     .store_operations
-                    .add(1, &self.attrs.cache_hit());
+                    .add(1, self.attrs.cache_hit());
                 STORE_OPERATION_METRICS
                     .store_operation_duration
-                    .record(duration_ms as f64, &self.attrs.cache_hit());
+                    .record(duration_ms as f64, self.attrs.cache_hit());
             } else {
                 STORE_OPERATION_METRICS
                     .store_operations
-                    .add(1, &self.attrs.cache_miss());
+                    .add(1, self.attrs.cache_miss());
                 STORE_OPERATION_METRICS
                     .store_operation_duration
-                    .record(duration_ms as f64, &self.attrs.cache_miss());
+                    .record(duration_ms as f64, self.attrs.cache_miss());
             }
         }
 
@@ -73,17 +73,17 @@ impl StoreDriver for MetricsStore {
         if result.is_ok() {
             STORE_OPERATION_METRICS
                 .store_operations
-                .add(1, &self.attrs.write_success());
+                .add(1, self.attrs.write_success());
             STORE_OPERATION_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.write_success());
+                .record(duration_ms as f64, self.attrs.write_success());
         } else {
             STORE_OPERATION_METRICS
                 .store_operations
-                .add(1, &self.attrs.write_error());
+                .add(1, self.attrs.write_error());
             STORE_OPERATION_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.write_error());
+                .record(duration_ms as f64, self.attrs.write_error());
         }
 
         result
@@ -102,17 +102,17 @@ impl StoreDriver for MetricsStore {
         if result.is_ok() {
             STORE_OPERATION_METRICS
                 .store_operations
-                .add(1, &self.attrs.read_success());
+                .add(1, self.attrs.read_success());
             STORE_OPERATION_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.read_success());
+                .record(duration_ms as f64, self.attrs.read_success());
         } else {
             STORE_OPERATION_METRICS
                 .store_operations
-                .add(1, &self.attrs.read_error());
+                .add(1, self.attrs.read_error());
             STORE_OPERATION_METRICS
                 .store_operation_duration
-                .record(duration_ms as f64, &self.attrs.read_error());
+                .record(duration_ms as f64, self.attrs.read_error());
         }
 
         result

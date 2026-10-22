@@ -361,7 +361,7 @@ impl ConnectionManagerWorker {
                 |err| Err((identifier, err)),
                 |channel| {
                     Ok(EstablishedChannel {
-                        channel: channel.into(),
+                        channel,
                         identifier,
                         // Jitter so a pool dialed at once does not expire at once.
                         expires_at: max_age.map(|age| {

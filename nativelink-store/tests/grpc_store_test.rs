@@ -305,7 +305,7 @@ impl ByteStream for StallingReadServer {
         drop(requests);
 
         if self.flood {
-            let stream = futures::stream::repeat_with(|| {
+            let stream = stream::repeat_with(|| {
                 Ok(ReadResponse {
                     data: vec![0u8; 1024].into(),
                 })
@@ -315,15 +315,15 @@ impl ByteStream for StallingReadServer {
         if is_first {
             // One chunk, then silence — like a stream on a connection whose
             // flow-control window was exhausted by other streams.
-            let stream = futures::stream::iter([Ok(ReadResponse {
+            let stream = stream::iter([Ok(ReadResponse {
                 data: RAW_INPUT.as_bytes().into(),
             })])
-            .chain(futures::stream::pending());
+            .chain(stream::pending());
             return Ok(Response::new(Box::pin(stream)));
         }
         // The retried request (resuming past the delivered chunk) gets a
         // clean immediate EOF.
-        Ok(Response::new(Box::pin(futures::stream::empty())))
+        Ok(Response::new(Box::pin(stream::empty())))
     }
 
     async fn write(

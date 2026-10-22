@@ -85,6 +85,7 @@ pub fn is_enabled() -> bool {
 /// RAII guard for the shared (spawn) side. Holds a real read guard only when
 /// the fork guard is enabled; otherwise it is a no-op. Either way, callers hold
 /// it across `Command::spawn` and drop it afterward with identical code.
+#[derive(Debug)]
 #[must_use = "the guard releases as soon as it is dropped; bind it across the spawn"]
 pub enum SpawnGuard {
     Held(RwLockReadGuard<'static, ()>),
@@ -93,6 +94,7 @@ pub enum SpawnGuard {
 
 /// RAII guard for the exclusive (executable-writer) side. Holds a real write
 /// guard only when the fork guard is enabled; otherwise it is a no-op.
+#[derive(Debug)]
 #[must_use = "the guard releases as soon as it is dropped; bind it across the writable-fd span"]
 pub enum ExecWriteGuard {
     Held(RwLockWriteGuard<'static, ()>),

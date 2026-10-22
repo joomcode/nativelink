@@ -967,11 +967,6 @@ where
         while futures.next().await.is_some() {}
     }
 
-    /// Number of items in the map, leased or not.
-    pub fn len(&self) -> u64 {
-        u64::try_from(self.state.lock().lru.len()).unwrap_or(u64::MAX)
-    }
-
     fn inner_insert_many<It>(
         &self,
         state: &mut State<K, Q, T, C>,
