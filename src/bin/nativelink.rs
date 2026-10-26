@@ -52,7 +52,7 @@ use nativelink_store::store_manager::StoreManager;
 use nativelink_util::common::fs::set_open_file_limit;
 use nativelink_util::digest_hasher::{DigestHasherFunc, set_default_digest_hasher_func};
 use nativelink_util::health_utils::HealthRegistryBuilder;
-use nativelink_util::metrics::set_identity_allowlist;
+use nativelink_util::metrics::{SERVER_METRICS, set_identity_allowlist};
 use nativelink_util::origin_event_publisher::OriginEventPublisher;
 #[cfg(target_family = "unix")]
 use nativelink_util::shutdown_guard::Priority;
@@ -383,12 +383,14 @@ async fn inner_main(
 
         let health_registry = health_registry_builder.lock().await.build();
 
-        let mut svc =
-            tonic_services
-                .into_axum_router()
-                .layer(nativelink_util::telemetry::OtlpLayer::new(
-                    server_cfg.experimental_identity_header.required,
-                ));
+        let mut svc = tonic_services
+            .into_axum_router()
+            .layer(nativelink_util::telemetry::OtlpLayer::new(
+                server_cfg.experimental_identity_header.required,
+            ))
+            .layer(nativelink_util::telemetry::InFlightLayer::new(
+                SERVER_METRICS.inflight_requests.clone(),
+            ));
 
         if let Some(health_cfg) = services.health {
             let path = if health_cfg.path.is_empty() {
@@ -637,6 +639,8 @@ async fn inner_main(
                                 let (http, svc, maybe_tls_acceptor) =
                                     (http.clone(), svc.clone(), maybe_tls_acceptor.clone());
                                 let shutdown_rx = drain_connections.then(|| shutdown_tx.subscribe());
+                                let connection_guard =
+                                    SERVER_METRICS.connection_guard(socket_addr.to_string());
 
                                 background_spawn!(
                                     name: "http_connection",
@@ -645,6 +649,7 @@ async fn inner_main(
                                         remote_addr = %remote_addr,
                                         socket_addr = %socket_addr,
                                     ).in_scope(|| async move {
+                                        let _connection_guard = connection_guard;
                                         let serve_connection = if let Some(tls_acceptor) = maybe_tls_acceptor {
                                             match tls_acceptor.accept(tcp_stream).await {
                                                 Ok(tls_stream) => Either::Left(http.serve_connection(

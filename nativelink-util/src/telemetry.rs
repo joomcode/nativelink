@@ -24,6 +24,7 @@ use ginepro::LoadBalancedChannel;
 use hyper::http::Response;
 use nativelink_error::{Code, ResultExt, make_err};
 use nativelink_proto::build::bazel::remote::execution::v2::RequestMetadata;
+use opentelemetry::metrics::UpDownCounter;
 use opentelemetry::propagation::{Injector, TextMapCompositePropagator};
 use opentelemetry::trace::{TraceContextExt, Tracer, TracerProvider};
 use opentelemetry::{KeyValue, global};
@@ -49,6 +50,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry, fmt, registry};
 use uuid::Uuid;
 
+use crate::metrics::UpDownGuard;
 use crate::origin_event::{BAZEL_METADATA_KEY, request_metadata_to_baggage};
 
 /// The OTLP "service.name" field for all nativelink services.
@@ -403,6 +405,100 @@ NativeLink instance configured to require this OpenTelemetry Baggage header:
 
         let cx = cx.with_value(client_headers);
         Box::pin(async move { inner.call(req).with_context(cx).await })
+    }
+}
+
+/// Counts requests in progress on `counter`, labelled with the request path.
+///
+/// A request counts from `call` until its response body is dropped, not until
+/// the response headers are ready: a `ByteStream` `Read` or `Write` does its
+/// work while the body streams.
+#[derive(Debug, Clone)]
+pub struct InFlightLayer {
+    counter: UpDownCounter<i64>,
+}
+
+impl InFlightLayer {
+    pub const fn new(counter: UpDownCounter<i64>) -> Self {
+        Self { counter }
+    }
+}
+
+impl<S> tower::Layer<S> for InFlightLayer {
+    type Service = InFlightMiddleware<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        InFlightMiddleware {
+            inner,
+            counter: self.counter.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InFlightMiddleware<S> {
+    inner: S,
+    counter: UpDownCounter<i64>,
+}
+
+impl<S, ReqBody, ResBody> tower::Service<hyper::http::Request<ReqBody>> for InFlightMiddleware<S>
+where
+    S: tower::Service<hyper::http::Request<ReqBody>, Response = Response<ResBody>>,
+    S::Future: Send + 'static,
+{
+    type Response = Response<InFlightBody<ResBody>>;
+    type Error = S::Error;
+    type Future = futures::future::BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: hyper::http::Request<ReqBody>) -> Self::Future {
+        let guard = UpDownGuard::new(
+            self.counter.clone(),
+            vec![KeyValue::new("rpc.path", req.uri().path().to_string())],
+        );
+        let response = self.inner.call(req);
+        Box::pin(async move {
+            Ok(response.await?.map(|inner| InFlightBody {
+                inner,
+                _guard: guard,
+            }))
+        })
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// Response body that holds an [`InFlightLayer`] count until dropped.
+    #[derive(Debug)]
+    pub struct InFlightBody<B> {
+        #[pin]
+        inner: B,
+        _guard: UpDownGuard,
+    }
+}
+
+impl<B: hyper::body::Body> hyper::body::Body for InFlightBody<B> {
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        self.project().inner.poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
     }
 }
 

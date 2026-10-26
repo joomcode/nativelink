@@ -557,3 +557,60 @@ async fn inject_current_context_carries_baggage() -> Result<(), Box<dyn core::er
 
     Ok(())
 }
+
+// A streaming response stays in flight until its body is dropped, not only
+// until the handler returns the headers.
+#[nativelink_test(flavor = "multi_thread", worker_threads = 2)]
+async fn inflight_layer_counts_until_body_dropped() -> Result<(), Box<dyn core::error::Error>> {
+    let (port, received) = spawn_test_collector().await?;
+    let exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(format!("http://127.0.0.1:{port}"))
+        .with_protocol(Protocol::Grpc)
+        .build()?;
+    let meter_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .build();
+    let counter = meter_provider
+        .meter("nativelink_test")
+        .i64_up_down_counter("server_inflight_requests")
+        .build();
+
+    let svc = Router::new()
+        .route(
+            "/svc/Read",
+            axum::routing::post(|| async {
+                axum::body::Body::from_stream(futures::stream::pending::<
+                    Result<bytes::Bytes, Infallible>,
+                >())
+            }),
+        )
+        .layer(nativelink_util::telemetry::InFlightLayer::new(counter));
+
+    let inflight_after_flush = || -> Result<Vec<String>, Box<dyn core::error::Error>> {
+        meter_provider.force_flush()?;
+        let requests = received.lock().unwrap().split_off(0);
+        Ok(extract_sum_data_points(&requests)
+            .into_iter()
+            .filter(|(name, ..)| name == "server_inflight_requests")
+            .map(|(.., value)| value)
+            .collect())
+    };
+    let value = |v: i64| {
+        format!(
+            "{:?}",
+            Some(opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(v))
+        )
+    };
+
+    let request = Request::post("/svc/Read").body(axum::body::Body::empty())?;
+    let response = svc.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(inflight_after_flush()?, vec![value(1)]);
+
+    drop(response);
+    assert_eq!(inflight_after_flush()?, vec![value(0)]);
+
+    meter_provider.shutdown()?;
+    Ok(())
+}

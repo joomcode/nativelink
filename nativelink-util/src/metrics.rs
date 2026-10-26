@@ -2309,6 +2309,78 @@ pub struct ConnectionManagerMetrics {
     pub permit_wait_duration: metrics::Histogram<f64>,
 }
 
+/// Load on the serving side of each listener.
+///
+/// The `connection_manager_*` metrics are the client side: a pod reports the
+/// requests it sends, not the ones it serves, so they cannot tell how busy a
+/// server is. These two can, and they drop when more replicas share the load,
+/// which makes `server_inflight_requests` usable as an autoscaling signal.
+pub static SERVER_METRICS: LazyLock<ServerMetrics> = LazyLock::new(|| {
+    let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
+
+    ServerMetrics {
+        connections: meter
+            .i64_up_down_counter("server_connections")
+            .with_description("Open client connections per listener")
+            .with_unit("{connection}")
+            .build(),
+
+        inflight_requests: meter
+            .i64_up_down_counter("server_inflight_requests")
+            .with_description(
+                "gRPC requests being served. A streaming request counts until its response \
+                 body ends.",
+            )
+            .with_unit("{request}")
+            .build(),
+    }
+});
+
+/// `OpenTelemetry` instruments for server-side load.
+#[derive(Debug)]
+pub struct ServerMetrics {
+    /// Open client connections, by `server.address`
+    pub connections: metrics::UpDownCounter<i64>,
+    /// Requests in progress, by `rpc.path`
+    pub inflight_requests: metrics::UpDownCounter<i64>,
+}
+
+impl ServerMetrics {
+    /// Counts one open connection on `listener` until the guard is dropped.
+    #[must_use]
+    pub fn connection_guard(&self, listener: String) -> UpDownGuard {
+        UpDownGuard::new(
+            self.connections.clone(),
+            vec![KeyValue::new("server.address", listener)],
+        )
+    }
+}
+
+/// Adds one to an up-down counter and takes it back on drop, so every exit
+/// path -- error, early return, cancellation -- leaves the counter balanced.
+#[derive(Debug)]
+pub struct UpDownGuard {
+    counter: metrics::UpDownCounter<i64>,
+    attributes: Vec<KeyValue>,
+}
+
+impl UpDownGuard {
+    #[must_use]
+    pub fn new(counter: metrics::UpDownCounter<i64>, attributes: Vec<KeyValue>) -> Self {
+        counter.add(1, &attributes);
+        Self {
+            counter,
+            attributes,
+        }
+    }
+}
+
+impl Drop for UpDownGuard {
+    fn drop(&mut self) {
+        self.counter.add(-1, &self.attributes);
+    }
+}
+
 pub static GCS_METRICS: LazyLock<GcsMetrics> = LazyLock::new(|| {
     let meter = global::meter_with_scope(InstrumentationScope::builder("nativelink").build());
 
