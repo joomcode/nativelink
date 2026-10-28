@@ -48,15 +48,19 @@ use tokio::time::sleep;
 use tonic::{Request, Streaming};
 use tracing::{error, info, warn};
 
+/// How long to wait for the upstream to end the stream after the final state.
+const UPSTREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct GrpcActionStateResult {
     client_operation_id: OperationId,
-    rx: watch::Receiver<Arc<ActionState>>,
+    // Err means the upstream stream failed before the action finished.
+    rx: watch::Receiver<Result<Arc<ActionState>, Error>>,
 }
 
 #[async_trait]
 impl ActionStateResult for GrpcActionStateResult {
     async fn as_state(&self) -> Result<(Arc<ActionState>, Option<OriginMetadata>), Error> {
-        let mut action_state = self.rx.borrow().clone();
+        let mut action_state = self.rx.borrow().clone()?;
         Arc::make_mut(&mut action_state).client_operation_id = self.client_operation_id.clone();
         // TODO(palfrey) We currently don't support OriginMetadata in this implementation, but
         // we should.
@@ -68,7 +72,7 @@ impl ActionStateResult for GrpcActionStateResult {
             Error::from_std_err(Code::Internal, &e)
                 .append("Channel closed in GrpcActionStateResult::changed")
         })?;
-        let mut action_state = self.rx.borrow().clone();
+        let mut action_state = self.rx.borrow().clone()?;
         Arc::make_mut(&mut action_state).client_operation_id = self.client_operation_id.clone();
         // TODO(palfrey) We currently don't support OriginMetadata in this implementation, but
         // we should.
@@ -167,27 +171,54 @@ impl GrpcScheduler {
             let action_state =
                 ActionState::try_from_operation(initial_response, operation_id.clone())
                     .err_tip(|| "In GrpcScheduler::stream_state")?;
-            let (tx, mut rx) = watch::channel(Arc::new(action_state));
+            // After the final state, read the upstream stream to its end even
+            // if the client is gone. If we drop it before the trailers arrive,
+            // h2 resets the stream, and late frames for reset streams count
+            // towards h2's per-connection limit of 1024. At that limit h2 sends
+            // GOAWAY(too_many_internal_resets) and kills all streams on the
+            // connection.
+            let mut finished = action_state.stage.is_finished();
+            let (tx, mut rx) = watch::channel(Ok(Arc::new(action_state)));
             rx.mark_changed();
             background_spawn!("grpc_scheduler_stream_state", async move {
                 loop {
                     select!(
-                        () = tx.closed() => {
+                        () = tx.closed(), if !finished => {
                             info!(
                                 "Client disconnected in GrpcScheduler"
                             );
                             return;
                         }
+                        () = sleep(UPSTREAM_DRAIN_TIMEOUT), if finished => {
+                            warn!("Upstream did not end the stream after the final state in GrpcScheduler");
+                            return;
+                        }
                         response = result_stream.message() => {
-                            // When the upstream closes the channel, close the
-                            // downstream too.
-                            let Ok(Some(response)) = response else {
-                                return;
+                            let response = match response {
+                                Ok(Some(response)) => response,
+                                // Upstream ended the stream after the final state.
+                                Ok(None) if finished => return,
+                                // The upstream connection failed (for example, an h2 GOAWAY)
+                                // or the stream ended early. Send Unavailable, so the client
+                                // retries the action instead of failing it.
+                                res => {
+                                    let mut err = res.err().map_or_else(
+                                        || make_err!(Code::Unavailable, "Upstream scheduler closed the stream before the action finished"),
+                                        Error::from,
+                                    );
+                                    err.code = Code::Unavailable;
+                                    error!(?err, "Upstream stream failed in GrpcScheduler");
+                                    drop(tx.send(Err(err)));
+                                    return;
+                                }
                             };
                             let maybe_action_state = ActionState::try_from_operation(response, operation_id.clone());
                             match maybe_action_state {
                                 Ok(response) => {
-                                    if let Err(err) = tx.send(Arc::new(response)) {
+                                    finished |= response.stage.is_finished();
+                                    if let Err(err) = tx.send(Ok(Arc::new(response)))
+                                        && !finished
+                                    {
                                         info!(
                                             ?err,
                                             "Client error in GrpcScheduler"
@@ -388,3 +419,137 @@ impl KnownPlatformPropertyProvider for GrpcScheduler {
 }
 
 impl RootMetricsComponent for GrpcScheduler {}
+
+#[cfg(test)]
+mod tests {
+    use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::time::SystemTime;
+
+    use futures::Stream;
+    use nativelink_macro::nativelink_test;
+    use nativelink_proto::build::bazel::remote::execution::v2::execution_server::{
+        Execution, ExecutionServer,
+    };
+    use nativelink_util::action_messages::{ActionResult, ActionStage};
+    use nativelink_util::common::DigestInfo;
+    use tonic::transport::server::TcpIncoming;
+    use tonic::transport::{Endpoint, Server};
+    use tonic::{Response, Status};
+
+    use super::*;
+
+    type OpStream = Pin<Box<dyn Stream<Item = Result<Operation, Status>> + Send>>;
+
+    /// Answers the first Execute call with the given stream.
+    struct FakeExecution(Mutex<Option<OpStream>>);
+
+    #[tonic::async_trait]
+    impl Execution for FakeExecution {
+        type ExecuteStream = OpStream;
+        type WaitExecutionStream = OpStream;
+
+        async fn execute(
+            &self,
+            _request: Request<ExecuteRequest>,
+        ) -> Result<Response<OpStream>, Status> {
+            Ok(Response::new(self.0.lock().take().unwrap()))
+        }
+
+        async fn wait_execution(
+            &self,
+            _request: Request<WaitExecutionRequest>,
+        ) -> Result<Response<OpStream>, Status> {
+            Err(Status::unimplemented(""))
+        }
+    }
+
+    fn operation(stage: ActionStage) -> Operation {
+        ActionState {
+            stage,
+            last_transition_timestamp: SystemTime::now(),
+            client_operation_id: OperationId::default(),
+            action_digest: DigestInfo::zero_digest(),
+        }
+        .as_operation(OperationId::from("op"))
+    }
+
+    async fn upstream_result(upstream: OpStream) -> Box<dyn ActionStateResult> {
+        let listener = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = FakeExecution(Mutex::new(Some(upstream)));
+        background_spawn!("grpc_scheduler_test_server", async move {
+            Server::builder()
+                .add_service(ExecutionServer::new(service))
+                .serve_with_incoming(listener)
+                .await
+                .unwrap();
+        });
+        let channel = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let stream = ExecutionClient::new(channel)
+            .execute(ExecuteRequest::default())
+            .await
+            .unwrap()
+            .into_inner();
+        GrpcScheduler::stream_state(stream).await.unwrap()
+    }
+
+    async fn changed_after_upstream_ends(fail: bool) -> Error {
+        let mut items = vec![Ok(operation(ActionStage::Queued))];
+        if fail {
+            items.push(Err(Status::internal("upstream connection lost")));
+        }
+        let mut result = upstream_result(Box::pin(futures::stream::iter(items))).await;
+        // The initial Queued state.
+        result.changed().await.unwrap();
+        result.changed().await.unwrap_err()
+    }
+
+    #[nativelink_test]
+    async fn upstream_error_is_unavailable() {
+        let err = changed_after_upstream_ends(true).await;
+        assert_eq!(err.code, Code::Unavailable, "{err:?}");
+        assert!(
+            format!("{err:?}").contains("upstream connection lost"),
+            "{err:?}"
+        );
+    }
+
+    #[nativelink_test]
+    async fn upstream_early_end_is_unavailable() {
+        let err = changed_after_upstream_ends(false).await;
+        assert_eq!(err.code, Code::Unavailable, "{err:?}");
+    }
+
+    /// The client drops the result right after the final state. The upstream
+    /// ends its stream later. The scheduler must read the stream to its end
+    /// and not reset it, or the upstream drops the stream early.
+    #[nativelink_test]
+    async fn upstream_stream_is_drained_after_final_state() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let ended_clone = ended.clone();
+        let late_end = futures::stream::once(async move {
+            sleep(Duration::from_millis(200)).await;
+            ended_clone.store(true, Ordering::SeqCst);
+        })
+        .filter_map(|()| async { None });
+        let upstream = futures::stream::iter([
+            Ok(operation(ActionStage::Queued)),
+            Ok(operation(ActionStage::Completed(ActionResult::default()))),
+        ])
+        .chain(late_end);
+
+        let mut result = upstream_result(Box::pin(upstream)).await;
+        result.changed().await.unwrap();
+        let (state, _) = result.changed().await.unwrap();
+        assert!(state.stage.is_finished());
+        drop(result);
+
+        sleep(Duration::from_millis(500)).await;
+        assert!(ended.load(Ordering::SeqCst), "upstream stream was reset");
+    }
+}
