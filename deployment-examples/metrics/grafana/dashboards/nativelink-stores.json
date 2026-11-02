@@ -1473,7 +1473,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason=\\\"capacity\\\", store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name, store_type) * 3600\n/\nsum(nativelink_store_current_bytes{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}) by (store_name, store_type)",
+          "expr": "sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason=\"capacity\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_name, store_type) * 3600\n/\nsum(nativelink_store_current_bytes{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}) by (store_name, store_type)",
           "legendFormat": "{{store_name}} ({{store_type}})",
           "refId": "A"
         }
@@ -1524,7 +1524,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason=\\\"capacity\\\", store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name)",
+          "expr": "sum(rate(nativelink_store_evicted_bytes_total{store_eviction_reason=\"capacity\", store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_name)",
           "legendFormat": "evicted {{store_name}}",
           "refId": "A"
         },
@@ -1533,7 +1533,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_inserted_bytes_total{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name)",
+          "expr": "sum(rate(nativelink_store_inserted_bytes_total{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_name)",
           "legendFormat": "inserted {{store_name}}",
           "refId": "B"
         }
@@ -1587,7 +1587,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(nativelink_store_evictions_total{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}[$__rate_interval])) by (store_name, store_eviction_reason)",
+          "expr": "sum(rate(nativelink_store_evictions_total{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (store_name, store_eviction_reason)",
           "legendFormat": "{{store_name}} {{store_eviction_reason}}",
           "refId": "A"
         }
@@ -1638,13 +1638,217 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(nativelink_store_current_bytes{store_type=~\\\"$store_type\\\", service_namespace=~\\\"$instance\\\", store_name=~\\\"$store_name\\\"}) by (store_name, store_type)",
+          "expr": "sum(nativelink_store_current_bytes{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}) by (store_name, store_type)",
           "legendFormat": "{{store_name}} ({{store_type}})",
           "refId": "A"
         }
       ],
       "title": "Store Fill",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      },
+      "id": 26,
+      "panels": [],
+      "title": "Cache Item Age",
+      "type": "row"
+    },
+    {
+      "description": "Seconds since the least recently used item of each store was last inserted or read. This is how far back the store reaches now. The value is the maximum over pods. After a pod restart, filesystem stores show 0 until the files from before the restart are read again or evicted.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "spanNulls": true
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 80
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max(nativelink_store_oldest_item_age_seconds{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}) by (store_name, store_type)",
+          "legendFormat": "{{store_name}} ({{store_type}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Oldest Item Age",
+      "type": "timeseries"
+    },
+    {
+      "description": "Seconds since an evicted item was last inserted or read, when capacity or timeout pressure evicted it. This is the retention of the store: an item that is not read for longer than this is lost. Filesystem stores only.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "spanNulls": true
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 80
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.1, sum(rate(nativelink_store_evicted_item_age_seconds_bucket{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_name))",
+          "legendFormat": "p10 {{store_name}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.5, sum(rate(nativelink_store_evicted_item_age_seconds_bucket{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_name))",
+          "legendFormat": "p50 {{store_name}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum(rate(nativelink_store_evicted_item_age_seconds_bucket{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le, store_name))",
+          "legendFormat": "p90 {{store_name}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Evicted Item Age Percentiles",
+      "type": "timeseries"
+    },
+    {
+      "description": "Number of evicted items in each age bucket. Filesystem stores only.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 88
+      },
+      "id": 29,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": {
+          "exponent": 0.5,
+          "fill": "dark-orange",
+          "mode": "scheme",
+          "scale": "exponential",
+          "scheme": "Oranges",
+          "steps": 64
+        },
+        "filterValues": {
+          "le": 1e-09
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "s"
+        }
+      },
+      "pluginVersion": "10.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(increase(nativelink_store_evicted_item_age_seconds_bucket{store_type=~\"$store_type\", service_namespace=~\"$instance\", store_name=~\"$store_name\"}[$__rate_interval])) by (le)",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evicted Item Age Distribution",
+      "type": "heatmap"
     }
   ],
   "preload": false,
