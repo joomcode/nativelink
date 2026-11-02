@@ -21,7 +21,7 @@ use core::marker::PhantomData;
 use core::ops::RangeBounds;
 use core::pin::Pin;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -45,6 +45,22 @@ pub struct SerializedLRU<K> {
 struct EvictionItem<T: LenEntry + Debug> {
     seconds_since_anchor: i32,
     data: T,
+}
+
+impl<T: LenEntry + Debug> EvictionItem<T> {
+    /// Seconds since the item was last inserted or accessed.
+    fn idle_seconds(&self, now_since_anchor: i32) -> u64 {
+        u64::try_from(now_since_anchor.saturating_sub(self.seconds_since_anchor)).unwrap_or(0)
+    }
+}
+
+/// Receives the idle age, in seconds, of each item that eviction removes.
+struct EvictionAgeObserver(Box<dyn Fn(u64) + Send + Sync>);
+
+impl Debug for EvictionAgeObserver {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("EvictionAgeObserver")
+    }
 }
 
 pub trait LenEntry: 'static {
@@ -219,6 +235,7 @@ pub struct EvictingMap<
     max_seconds: i32,
     #[metric(help = "Maximum number of items to keep in the store")]
     max_count: u64,
+    eviction_age_observer: OnceLock<EvictionAgeObserver>,
 }
 
 // debugging helper used mostly to get a snapshot of what eviction threshold might be causing issues
@@ -234,6 +251,7 @@ pub struct EvictionSnapshot {
     replaced_items: u64,
     replaced_bytes: u64,
     inserted_bytes: u64,
+    oldest_item_age_secs: u64,
 }
 
 impl EvictionSnapshot {
@@ -277,6 +295,13 @@ impl EvictionSnapshot {
     #[must_use]
     pub const fn inserted_bytes(&self) -> u64 {
         self.inserted_bytes
+    }
+
+    /// Seconds since the least recently used item was last inserted or
+    /// accessed. Zero if the map is empty.
+    #[must_use]
+    pub const fn oldest_item_age_secs(&self) -> u64 {
+        self.oldest_item_age_secs
     }
 }
 
@@ -343,7 +368,18 @@ where
             evict_bytes: config.evict_bytes as u64,
             max_seconds: config.max_seconds as i32,
             max_count: config.max_count,
+            eviction_age_observer: OnceLock::new(),
         }
+    }
+
+    /// Reports the idle age, in seconds, of every item that capacity or
+    /// timeout pressure evicts. The observer runs under the map lock, so it
+    /// must be cheap. Only the first call has an effect.
+    pub fn set_eviction_age_observer(&self, observer: impl Fn(u64) + Send + Sync + 'static) {
+        drop(
+            self.eviction_age_observer
+                .set(EvictionAgeObserver(Box::new(observer))),
+        );
     }
 
     pub async fn enable_filtering(&self) {
@@ -415,6 +451,7 @@ where
     // Gets a debugging snapshot of the state of the map. It's inevitably out of date by the time it gets sent to the user
     // but does provide a momentary glimpse into possible issues e.g. if current_bytes is close to max_bytes
     pub fn get_snapshot(&self) -> EvictionSnapshot {
+        let now = i32::try_from(self.anchor_time.elapsed().as_secs()).unwrap_or(i32::MAX);
         let state = self.state.lock();
         EvictionSnapshot {
             max_bytes: self.max_bytes,
@@ -427,6 +464,10 @@ where
             replaced_items: state.replaced_items.get(),
             replaced_bytes: state.replaced_bytes.get(),
             inserted_bytes: state.lifetime_inserted_bytes.get(),
+            oldest_item_age_secs: state
+                .lru
+                .peek_lru()
+                .map_or(0, |(_, item)| item.idle_seconds(now)),
         }
     }
 
@@ -451,6 +492,7 @@ where
 
         let mut items_to_unref = Vec::new();
         let mut removal_futures = Vec::new();
+        let now = i32::try_from(self.anchor_time.elapsed().as_secs()).unwrap_or(i32::MAX);
 
         while self.should_evict(state.lru.len(), peek_entry, state.sum_store_size, max_bytes) {
             let (key, eviction_item) = state
@@ -458,6 +500,9 @@ where
                 .pop_lru()
                 .expect("Tried to peek() then pop() but failed");
             debug!(?key, "Evicting");
+            if let Some(observer) = self.eviction_age_observer.get() {
+                (observer.0)(eviction_item.idle_seconds(now));
+            }
             let (data, futures) = state.remove(key.borrow(), &eviction_item, false);
             items_to_unref.push(data);
             removal_futures.extend(futures.into_iter());

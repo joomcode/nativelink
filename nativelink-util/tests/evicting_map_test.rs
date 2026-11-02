@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use mock_instant::thread_local::MockClock;
@@ -24,7 +24,7 @@ use nativelink_macro::nativelink_test;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::evicting_map::{EvictingMap, LenEntry};
 use nativelink_util::instant_wrapper::MockInstantWrapped;
-use nativelink_util::metrics::{StoreType, register_churn_source};
+use nativelink_util::metrics::{StoreType, eviction_age_recorder, register_churn_source};
 use pretty_assertions::assert_eq;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -934,5 +934,49 @@ async fn snapshot_separates_eviction_from_replacement() -> Result<(), Error> {
         "churn_test_store",
         Box::new(move || evicting_map.get_snapshot()),
     );
+    Ok(())
+}
+
+/// The age metrics measure idle time: a `get` resets the age, and eviction
+/// reports the age of the least recently used item.
+#[nativelink_test]
+async fn eviction_reports_idle_age() -> Result<(), Error> {
+    let evicting_map = EvictingMap::<String, String, BytesWrapper, MockInstantWrapped>::new(
+        &EvictionPolicy {
+            max_count: 2,
+            max_seconds: 0,
+            max_bytes: 0,
+            evict_bytes: 0,
+        },
+        MockInstantWrapped::default(),
+    );
+    let ages = Arc::new(Mutex::new(Vec::new()));
+    let observed = ages.clone();
+    evicting_map.set_eviction_age_observer(move |age| observed.lock().unwrap().push(age));
+
+    assert_eq!(evicting_map.get_snapshot().oldest_item_age_secs(), 0);
+
+    evicting_map
+        .insert("key-1".into(), Bytes::new().into())
+        .await; // t=0
+    MockClock::advance(Duration::from_secs(10));
+    evicting_map
+        .insert("key-2".into(), Bytes::new().into())
+        .await; // t=10
+    MockClock::advance(Duration::from_secs(5));
+    assert!(evicting_map.get(&"key-1".to_string()).await.is_some()); // t=15
+    MockClock::advance(Duration::from_secs(20)); // t=35
+
+    // key-2 is now the least recently used item.
+    assert_eq!(evicting_map.get_snapshot().oldest_item_age_secs(), 25);
+
+    evicting_map
+        .insert("key-3".into(), Bytes::new().into())
+        .await;
+    assert_eq!(*ages.lock().unwrap(), vec![25]);
+    assert_eq!(evicting_map.get_snapshot().oldest_item_age_secs(), 20);
+
+    // Build the histogram. A bad instrument definition fails here.
+    eviction_age_recorder(StoreType::Filesystem, "age_test_store")(1);
     Ok(())
 }

@@ -22,7 +22,7 @@ use futures::{Future, TryStreamExt};
 use nativelink_config::stores::{ExperimentalCloudObjectSpec, RedisMode, StoreSpec};
 use nativelink_error::Error;
 use nativelink_util::health_utils::HealthRegistryBuilder;
-use nativelink_util::metrics::{StoreType, register_churn_source};
+use nativelink_util::metrics::{StoreType, eviction_age_recorder, register_churn_source};
 use nativelink_util::store_trait::{Store, StoreDriver};
 
 use crate::azure_blob_store::AzureBlobStore;
@@ -180,6 +180,7 @@ fn register_store_churn(store: &Arc<dyn StoreDriver>, name: &str, spec: &StoreSp
             Box::new(move || store.get_eviction_snapshot()),
         );
     } else if let Ok(store) = any_store.clone().downcast::<FilesystemStore>() {
+        store.set_eviction_age_observer(eviction_age_recorder(compute_store_type(spec), name));
         register_churn_source(
             compute_store_type(spec),
             name,

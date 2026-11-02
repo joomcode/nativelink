@@ -2006,6 +2006,7 @@ struct ChurnTotals {
     inserted_bytes: u64,
     current_bytes: u64,
     current_items: u64,
+    oldest_item_age_secs: u64,
 }
 
 /// One attribute set, with the stores it reports.
@@ -2042,6 +2043,9 @@ impl ChurnSource {
             totals.inserted_bytes += snapshot.inserted_bytes();
             totals.current_bytes += snapshot.current_bytes();
             totals.current_items += snapshot.current_items() as u64;
+            totals.oldest_item_age_secs = totals
+                .oldest_item_age_secs
+                .max(snapshot.oldest_item_age_secs());
         }
         totals
     }
@@ -2064,6 +2068,7 @@ struct ChurnMetrics {
     _inserted_bytes: metrics::ObservableCounter<u64>,
     _current_bytes: metrics::ObservableGauge<u64>,
     _current_items: metrics::ObservableGauge<u64>,
+    _oldest_item_age: metrics::ObservableGauge<u64>,
 }
 
 static CHURN_METRICS: LazyLock<ChurnMetrics> = LazyLock::new(|| {
@@ -2128,18 +2133,74 @@ static CHURN_METRICS: LazyLock<ChurnMetrics> = LazyLock::new(|| {
                 }
             })
             .build(),
+
+        _oldest_item_age: meter
+            .u64_observable_gauge("store_oldest_item_age_seconds")
+            .with_description(
+                "Seconds since the least recently used item of a store was last inserted or accessed",
+            )
+            .with_unit("s")
+            .with_callback(|observer| {
+                for source in CHURN_SOURCES.lock().iter() {
+                    observer.observe(source.totals().oldest_item_age_secs, &source.base);
+                }
+            })
+            .build(),
     }
 });
+
+/// Idle age of the items that capacity or timeout pressure evicts. This is how
+/// long an item stays in a store without a hit before the store drops it.
+static EVICTED_ITEM_AGE: LazyLock<metrics::Histogram<u64>> = LazyLock::new(|| {
+    const MINUTE: f64 = 60.0;
+    const HOUR: f64 = 60.0 * MINUTE;
+    const DAY: f64 = 24.0 * HOUR;
+    global::meter_with_scope(InstrumentationScope::builder("nativelink").build())
+        .u64_histogram("store_evicted_item_age_seconds")
+        .with_description("Seconds since an evicted item was last inserted or accessed")
+        .with_unit("s")
+        .with_boundaries(vec![
+            MINUTE,
+            5.0 * MINUTE,
+            15.0 * MINUTE,
+            HOUR,
+            3.0 * HOUR,
+            6.0 * HOUR,
+            12.0 * HOUR,
+            DAY,
+            2.0 * DAY,
+            3.0 * DAY,
+            7.0 * DAY,
+            14.0 * DAY,
+            30.0 * DAY,
+        ])
+        .build()
+});
+
+/// Returns an observer for `EvictingMap::set_eviction_age_observer` that
+/// records into the `store_evicted_item_age_seconds` histogram.
+pub fn eviction_age_recorder(
+    store_type: StoreType,
+    name: &str,
+) -> impl Fn(u64) + Send + Sync + 'static {
+    let attrs = store_attrs(store_type, name);
+    let histogram = EVICTED_ITEM_AGE.clone();
+    move |age_secs| histogram.record(age_secs, &attrs)
+}
+
+fn store_attrs(store_type: StoreType, name: &str) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new(STORE_TYPE, store_type.to_string()),
+        KeyValue::new(STORE_NAME, name.to_string()),
+    ]
+}
 
 /// Reports the cache churn of one named store.
 ///
 /// Call this once per store, at startup. The `snapshot` function runs on every
 /// metrics collection, so it must only read counters.
 pub fn register_churn_source(store_type: StoreType, name: &str, snapshot: ChurnSnapshotFn) {
-    let base = vec![
-        KeyValue::new(STORE_TYPE, store_type.to_string()),
-        KeyValue::new(STORE_NAME, name.to_string()),
-    ];
+    let base = store_attrs(store_type, name);
     {
         let mut sources = CHURN_SOURCES.lock();
         if let Some(source) = sources.iter_mut().find(|source| source.base == base) {

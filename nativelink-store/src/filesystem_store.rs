@@ -1562,6 +1562,11 @@ impl<Fe: FileEntry> FilesystemStore<Fe> {
         self.evicting_map.get_snapshot()
     }
 
+    /// See [`EvictingMap::set_eviction_age_observer`].
+    pub fn set_eviction_age_observer(&self, observer: impl Fn(u64) + Send + Sync + 'static) {
+        self.evicting_map.set_eviction_age_observer(observer);
+    }
+
     // Only for tests, so we can run check_duplicate_files
     pub fn get_evicting_map(&self) -> Arc<FsEvictingMap<'static, Fe>> {
         self.evicting_map.clone()

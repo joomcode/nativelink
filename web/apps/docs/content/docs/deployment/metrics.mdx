@@ -180,6 +180,8 @@ nothing here.
 | `nativelink_store_inserted_bytes_total` | Counter | Bytes inserted since start | `store_name`, `store_type` |
 | `nativelink_store_current_bytes` | Gauge | Current size of the live items | `store_name`, `store_type` |
 | `nativelink_store_current_items` | Gauge | Current number of live items | `store_name`, `store_type` |
+| `nativelink_store_oldest_item_age_seconds` | Gauge | Idle time of the least recently used item | `store_name`, `store_type` |
+| `nativelink_store_evicted_item_age_seconds` | Histogram | Idle time of an item when capacity or timeout pressure evicted it (`filesystem` only) | `store_name`, `store_type` |
 
 The `store_eviction_reason` label has two values. `capacity` means that
 capacity or timeout pressure dropped the item. This is churn. `replaced` means
