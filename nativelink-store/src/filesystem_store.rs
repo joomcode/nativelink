@@ -620,7 +620,7 @@ async fn add_files_to_cache<Fe: FileEntry>(
                 key: key.borrow().into_owned(),
             }),
         );
-        let time_since_anchor = if let Ok(d) = anchor_time.duration_since(atime) {
+        let age_at_start = if let Ok(d) = anchor_time.duration_since(atime) {
             d
         } else {
             warn!(
@@ -635,7 +635,9 @@ async fn add_files_to_cache<Fe: FileEntry>(
             .insert_with_time(
                 key.into_owned().into(),
                 Arc::new(file_entry),
-                i32::try_from(time_since_anchor.as_secs()).unwrap_or(i32::MAX),
+                // The file was last accessed before the anchor, so its time
+                // since the anchor is negative.
+                -i32::try_from(age_at_start.as_secs()).unwrap_or(i32::MAX),
             )
             .await;
         Ok(())
@@ -723,18 +725,27 @@ async fn add_files_to_cache<Fe: FileEntry>(
         anchor_time: &SystemTime,
         shared_context: &Arc<SharedContext>,
         block_size: u64,
-        folder: &str,
     ) -> Result<(), Error> {
-        let file_infos = read_files(Some(folder), shared_context).await?;
-        let file_type = match folder {
-            STR_FOLDER => FileType::String,
-            DIGEST_FOLDER => FileType::Digest,
-            _ => panic!("Invalid folder type"),
-        };
+        let mut file_infos = Vec::new();
+        for (folder, file_type) in [
+            (DIGEST_FOLDER, FileType::Digest),
+            (STR_FOLDER, FileType::String),
+        ] {
+            file_infos.extend(
+                read_files(Some(folder), shared_context)
+                    .await?
+                    .into_iter()
+                    .filter(|x| x.3)
+                    .map(|(file_name, atime, data_size, _)| {
+                        (folder, file_type, file_name, atime, data_size)
+                    }),
+            );
+        }
+        // Insert the least recently accessed files first, so that they are
+        // the first to be evicted.
+        file_infos.sort_unstable_by_key(|x| x.3);
 
-        let path_root = format!("{}/{folder}", shared_context.content_path);
-
-        for (file_name, atime, data_size, _) in file_infos.into_iter().filter(|x| x.3) {
+        for (folder, file_type, file_name, atime, data_size) in file_infos {
             let result = process_entry(
                 evicting_map,
                 &file_name,
@@ -749,7 +760,13 @@ async fn add_files_to_cache<Fe: FileEntry>(
             if let Err(err) = result {
                 warn!(?file_name, ?err, "Failed to add file to eviction cache",);
                 // Ignore result.
-                drop(fs::remove_file(format!("{path_root}/{file_name}")).await);
+                drop(
+                    fs::remove_file(format!(
+                        "{}/{folder}/{file_name}",
+                        shared_context.content_path
+                    ))
+                    .await,
+                );
             }
         }
         Ok(())
@@ -757,24 +774,7 @@ async fn add_files_to_cache<Fe: FileEntry>(
 
     move_old_cache(shared_context, rename_fn).await?;
 
-    add_files_to_cache(
-        evicting_map,
-        anchor_time,
-        shared_context,
-        block_size,
-        DIGEST_FOLDER,
-    )
-    .await?;
-
-    add_files_to_cache(
-        evicting_map,
-        anchor_time,
-        shared_context,
-        block_size,
-        STR_FOLDER,
-    )
-    .await?;
-    Ok(())
+    add_files_to_cache(evicting_map, anchor_time, shared_context, block_size).await
 }
 
 async fn prune_temp_path(temp_path: &str) -> Result<(), Error> {

@@ -2324,3 +2324,72 @@ async fn unref_does_not_orphan_content_file_when_temp_dir_missing() -> Result<()
 
     Ok(())
 }
+
+/// Files found on disk at startup must keep their access order: the least
+/// recently accessed file is evicted first, in every folder, and its age is
+/// the time since its last access.
+#[nativelink_test]
+async fn startup_load_keeps_access_order() -> Result<(), Error> {
+    const HOUR: u64 = 3600;
+    const FILE_SIZE: usize = 10;
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    fs::create_dir_all(format!("{content_path}/{DIGEST_FOLDER}")).await?;
+    fs::create_dir_all(format!("{content_path}/{STR_FOLDER}")).await?;
+
+    let now = SystemTime::now();
+    let write_file = |path: String, age_hours: u64| -> Result<(), Error> {
+        std::fs::write(&path, [0u8; FILE_SIZE]).err_tip(|| format!("writing {path}"))?;
+        let atime = now - Duration::from_secs(age_hours * HOUR);
+        fs_set_times::set_atime(&path, atime.into())?;
+        Ok(())
+    };
+    // Digest files sort by name in the opposite order of their access time,
+    // so a load in directory order puts the oldest file last.
+    let digests: Vec<DigestInfo> = (1..=6u64)
+        .map(|i| DigestInfo::try_new(&format!("{i:064x}"), FILE_SIZE))
+        .collect::<Result<_, _>>()?;
+    for (i, digest) in digests.iter().enumerate() {
+        write_file(
+            format!(
+                "{content_path}/{DIGEST_FOLDER}/{}-{FILE_SIZE}",
+                digest.packed_hash()
+            ),
+            i as u64 + 1,
+        )?;
+    }
+    // The string file is older than every digest file.
+    write_file(format!("{content_path}/{STR_FOLDER}/{STRING_NAME}"), 7)?;
+
+    let fs_store = FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+        content_path,
+        temp_path,
+        eviction_policy: Some(EvictionPolicy {
+            // The 7 files fit. 2 more files evict 2 files.
+            max_bytes: 8 * FILE_SIZE,
+            ..Default::default()
+        }),
+        block_size: 1,
+        ..Default::default()
+    })
+    .await?;
+
+    let oldest_age = fs_store.get_eviction_snapshot().oldest_item_age_secs();
+    assert!(
+        (7 * HOUR..7 * HOUR + 60).contains(&oldest_age),
+        "oldest item age is {oldest_age}s, expected about 7h"
+    );
+
+    let store = Store::new(fs_store);
+    let new_digest = DigestInfo::try_new(VALID_HASH, 2 * FILE_SIZE)?;
+    store
+        .update_oneshot(new_digest, vec![0u8; 2 * FILE_SIZE].into())
+        .await?;
+
+    assert_eq!(store.has(StoreKey::new_str(STRING_NAME)).await, Ok(None));
+    assert_eq!(store.has(digests[5]).await, Ok(None));
+    for digest in &digests[..5] {
+        assert_eq!(store.has(*digest).await, Ok(Some(FILE_SIZE as u64)));
+    }
+    Ok(())
+}
